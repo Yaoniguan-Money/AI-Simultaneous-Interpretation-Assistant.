@@ -74,6 +74,11 @@ export class FastChannelPipeline {
     this.translatedSentences = [];
   }
 
+  /** 话题切换时重置翻译记忆，不停止管线 */
+  resetContext(): void {
+    this.translatedSentences = [];
+  }
+
   /**
    * 处理一段音频数据，内部串行化防止并发
    * 流程：ASR 识别 → 语义分句 → LLM 翻译 → 回调通知
