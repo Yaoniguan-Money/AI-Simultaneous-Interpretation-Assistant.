@@ -30,12 +30,19 @@ export interface TranslatedSentence {
   translation: string;
 }
 
+/** 话题切换记录 */
+export interface Topic {
+  name: string;
+  timestamp: number;
+}
+
 /** 共享上下文——由 Channel 2 注入，Channel 1 翻译时携带 */
 export interface SharedContext {
   domain: string | null;
   domainConfidence: number;
   activeTerms: Map<string, string>;
   recentSummary: string;
+  topicHistory: Topic[];
 }
 
 /** 翻译请求——包含待翻译文本和完整上下文 */
