@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-electron/
+.env
+.env.local
+*.log
+credentials.enc
+.DS_Store
+Thumbs.db
+
+# 比赛相关文档仅本地保留，不提交到仓库
+方案设计文档.md
+AI 同声传译助手.txt

@@ -1,0 +1,17 @@
+appId: com.ai-interpreter.app
+productName: AI 同声传译助手
+directories:
+  output: release
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: assets/icon.ico
+files:
+  - dist
+  - dist-electron
