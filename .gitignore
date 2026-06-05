@@ -13,5 +13,13 @@ Thumbs.db
 AI 同声传译助手.txt
 credentials.md
 
+# 设计参考文件（不提交到仓库）
+design-*.html
+
 # Claude Code 本地配置
 .claude/
+.agents/
+skills-lock.json
+
+# VSCode 本地配置
+.vscode/
