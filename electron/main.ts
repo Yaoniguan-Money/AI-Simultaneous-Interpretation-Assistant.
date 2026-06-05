@@ -2,6 +2,11 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
 import { IPC_CHANNELS } from '../shared/ipc-channels';
 import { APP_NAME } from '../shared/app-config';
+import {
+  closeOverlayWindow,
+  createOverlayWindow,
+  hideOverlayWindow,
+} from './overlay-window';
 
 /** 主控制窗口引用 */
 let mainWindow: BrowserWindow | null = null;
@@ -28,7 +33,7 @@ function createMainWindow(): void {
   }
 }
 
-/** 应用就绪后创建窗口 */
+/** 应用就绪后创建窗口并注册 IPC */
 app.whenReady().then(() => {
   createMainWindow();
 
@@ -39,14 +44,25 @@ app.whenReady().then(() => {
   });
 });
 
-/** 所有窗口关闭时退出应用 */
+/** 所有窗口关闭时退出应用——同时清理悬浮窗 */
 app.on('window-all-closed', () => {
+  closeOverlayWindow();
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
-// ---- IPC 通道定义（预留，后续 PR 扩展） ----
+// ---- IPC 通道 ----
 
-/** 示例 IPC handler：获取应用版本 */
+/** 获取应用版本 */
 ipcMain.handle(IPC_CHANNELS.APP_GET_VERSION, () => app.getVersion());
+
+/** 显示字幕悬浮窗 */
+ipcMain.handle(IPC_CHANNELS.OVERLAY_SHOW, () => {
+  createOverlayWindow();
+});
+
+/** 隐藏字幕悬浮窗 */
+ipcMain.handle(IPC_CHANNELS.OVERLAY_HIDE, () => {
+  hideOverlayWindow();
+});
