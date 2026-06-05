@@ -5,4 +5,6 @@ export const IPC_CHANNELS = {
   OVERLAY_SHOW: 'overlay:show',
   /** 隐藏字幕悬浮窗 */
   OVERLAY_HIDE: 'overlay:hide',
+  /** 获取桌面捕获源 ID（系统音频） */
+  DESKTOP_GET_SOURCE_ID: 'desktop:getSourceId',
 } as const;
