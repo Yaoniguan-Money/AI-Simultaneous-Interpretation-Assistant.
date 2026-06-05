@@ -85,7 +85,7 @@ export class FastChannelPipeline {
    * @param audio PCM 16kHz 16bit mono 音频数据
    * @param timestamp 音频时间戳（毫秒）
    */
-  async processChunk(audio: Buffer, timestamp: number): Promise<void> {
+  async processChunk(audio: Uint8Array, timestamp: number): Promise<void> {
     if (!this.active) return;
     if (!audio || audio.length === 0) return;
 

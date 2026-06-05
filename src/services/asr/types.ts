@@ -42,7 +42,7 @@ export interface ASRProvider {
   configure(config: ASRConfig): Promise<void>;
 
   /** 发送一段音频数据进行识别，返回识别结果 */
-  recognize(audio: Buffer): Promise<ASRResult>;
+  recognize(audio: Uint8Array): Promise<ASRResult>;
 
   /** 释放资源（如有 WebSocket 连接等） */
   dispose(): void;

@@ -1,6 +1,5 @@
 import type { ASRConfig, ASRProvider, ASRResult } from './types';
 import { ensureConfigured } from '../provider-utils';
-import crypto from 'crypto';
 
 /**
  * 讯飞语音听写 REST API 协议常量
@@ -47,8 +46,8 @@ interface IFlyTekResponse {
 }
 
 /**
- * 讯飞语音听写 REST API 实现
- * 通过 HTTP POST 上传音频，返回识别文本
+ * 讯飞语音听写 REST API 实现（纯 JS 版本，零 Node.js 依赖）
+ * 可在渲染进程和主进程中使用
  */
 export class IFlyTekASR implements ASRProvider {
   readonly name = 'iflytek';
@@ -61,7 +60,7 @@ export class IFlyTekASR implements ASRProvider {
     this.config = { ...config };
   }
 
-  async recognize(audio: Buffer): Promise<ASRResult> {
+  async recognize(audio: Uint8Array): Promise<ASRResult> {
     const cfg = ensureConfigured(this.config, '讯飞 ASR');
     if (!audio || audio.length === 0) {
       return { text: '', isFinal: true, confidence: 0, startTime: 0, endTime: 0 };
@@ -101,8 +100,8 @@ export class IFlyTekASR implements ASRProvider {
 
   async validateCredentials(config: ASRConfig): Promise<boolean> {
     try {
-      // 最小有效音频片段：1 秒静音 PCM 16kHz 16bit mono
-      const testAudio = Buffer.alloc(32000, 0);
+      /** 1 秒静音 PCM 16kHz 16bit mono：32000 字节全零 */
+      const testAudio = new Uint8Array(32000);
       const tempASR = new IFlyTekASR();
       await tempASR.configure(config);
       const result = await tempASR.recognize(testAudio);
@@ -139,21 +138,19 @@ export class IFlyTekASR implements ASRProvider {
       engine_type: engineType,
       aue: PROTOCOL.AUDIO_ENCODING_RAW,
     };
-    return Buffer.from(JSON.stringify(param)).toString('base64');
+    /** btoa 替代 Node.js Buffer.from().toString('base64') */
+    return btoa(JSON.stringify(param));
   }
 
-  /** 计算讯飞鉴权 checksum */
+  /** 计算讯飞鉴权 checksum：纯 JS MD5 替代 Node crypto */
   private computeChecksum(apiSecret: string, timestamp: string, paramBase64: string): string {
-    return crypto
-      .createHash('md5')
-      .update(apiSecret + timestamp + paramBase64)
-      .digest('hex');
+    return md5Hex(apiSecret + timestamp + paramBase64);
   }
 
-  /** 将音频数据编码为 form 请求体 */
-  private buildFormBody(audio: Buffer): URLSearchParams {
+  /** 构建请求体，音频数据 base64 编码后放入 form */
+  private buildFormBody(audio: Uint8Array): URLSearchParams {
     const params = new URLSearchParams();
-    params.set(PROTOCOL.FORM_AUDIO_FIELD, audio.toString('base64'));
+    params.set(PROTOCOL.FORM_AUDIO_FIELD, uint8ToBase64(audio));
     return params;
   }
 
@@ -193,4 +190,118 @@ export class IFlyTekASR implements ASRProvider {
   private isAbortError(error: unknown): boolean {
     return error instanceof DOMException && error.name === 'AbortError';
   }
+}
+
+// ---- 纯 JavaScript 工具函数（替代 Node.js crypto 和 Buffer） ----
+
+/**
+ * 计算字符串的 MD5 哈希并返回十六进制字符串
+ * 纯 JavaScript 实现，零外部依赖，渲染进程和主进程均可使用
+ * 输入为短字符串（讯飞鉴权签名：apiSecret + timestamp + param，通常 < 200 字节）
+ */
+function md5Hex(input: string): string {
+  /** 将字符串转为 UTF-8 字节数组 */
+  const bytes = new TextEncoder().encode(input);
+  /** MD5 核心算法（RFC 1321） */
+  const words = md5(bytes);
+  /** 将 4 个 32-bit word 转为 32 字符十六进制字符串 */
+  const hex = (w: number): string =>
+    ((w >>> 0).toString(16).padStart(8, '0'));
+  return hex(words[0]) + hex(words[1]) + hex(words[2]) + hex(words[3]);
+}
+
+/**
+ * 纯 JS MD5 实现（RFC 1321）
+ * 输入为 Uint8Array，输出为 4 个 32-bit integer 的数组
+ */
+function md5(input: Uint8Array): [number, number, number, number] {
+  /** MD5 每轮移位量（常量） */
+  const S = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+             5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+             4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+             6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+
+  /** MD5 常量表：floor(abs(sin(i + 1)) * 2^32) */
+  const K: number[] = [];
+  for (let i = 0; i < 64; i++) {
+    K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000);
+  }
+
+  /** 填充消息至 512-bit 对齐 */
+  const msgLen = input.length;
+  const padLen = (msgLen % 64 < 56) ? (56 - msgLen % 64) : (120 - msgLen % 64);
+  const padded = new Uint8Array(msgLen + padLen + 8);
+  padded.set(input);
+  padded[msgLen] = 0x80;
+
+  /** 写入原始消息长度（低 64 位，little-endian） */
+  const bitLen = msgLen * 8;
+  const lenView = new DataView(padded.buffer, padded.byteLength - 8, 8);
+  lenView.setUint32(0, bitLen, true);      // 低 32 位
+  lenView.setUint32(4, Math.floor(bitLen / 0x100000000), true); // 高 32 位
+
+  /** 初始化 MD5 寄存器 */
+  let a = 0x67452301;
+  let b = 0xEFCDAB89;
+  let c = 0x98BADCFE;
+  let d = 0x10325476;
+
+  /** 逐 512-bit 块处理 */
+  const view = new DataView(padded.buffer);
+  for (let offset = 0; offset < padded.length; offset += 64) {
+    const M = new Uint32Array(16);
+    for (let i = 0; i < 16; i++) {
+      M[i] = view.getUint32(offset + i * 4, true);
+    }
+
+    let [aa, bb, cc, dd] = [a, b, c, d];
+
+    for (let i = 0; i < 64; i++) {
+      let f: number;
+      let g: number;
+      if (i < 16) {
+        f = (bb & cc) | (~bb & dd);
+        g = i;
+      } else if (i < 32) {
+        f = (dd & bb) | (~dd & cc);
+        g = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        f = bb ^ cc ^ dd;
+        g = (3 * i + 5) % 16;
+      } else {
+        f = cc ^ (bb | ~dd);
+        g = (7 * i) % 16;
+      }
+      const temp = dd;
+      dd = cc;
+      cc = bb;
+      bb = (bb + leftRotate(aa + f + K[i] + M[g], S[i])) >>> 0;
+      aa = temp;
+    }
+
+    a = (a + aa) >>> 0;
+    b = (b + bb) >>> 0;
+    c = (c + cc) >>> 0;
+    d = (d + dd) >>> 0;
+  }
+
+  return [a, b, c, d];
+}
+
+/** 32-bit 循环左移 */
+function leftRotate(value: number, shift: number): number {
+  return ((value << shift) | (value >>> (32 - shift))) >>> 0;
+}
+
+/**
+ * Uint8Array 转 Base64 字符串
+ * 替代 Node.js Buffer.toString('base64')
+ */
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const len = bytes.length;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
