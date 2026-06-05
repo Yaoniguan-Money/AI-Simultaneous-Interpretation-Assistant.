@@ -1,12 +1,27 @@
 import { useState } from 'react';
-import { useAtom } from 'jotai';
+import { useAtom, useAtomValue } from 'jotai';
 import { APP_NAME, APP_TAGLINE } from '../../../shared/app-config';
-import { bilingualAtom } from '../../stores/settings-store';
+import {
+  asrConfigAtom,
+  bilingualAtom,
+  llmConfigAtom,
+} from '../../stores/settings-store';
+import { useTranslationSession } from '../../hooks/useTranslationSession';
 
 /** 主控制窗口组件 */
 export function MainWindow(): JSX.Element {
   const [appVersion, setAppVersion] = useState<string>('');
   const [bilingual, setBilingual] = useAtom(bilingualAtom);
+
+  /** 从 Jotai 读取 ASR/LLM 配置（PR13 设置页面写入） */
+  const asrConfig = useAtomValue(asrConfigAtom);
+  const llmConfig = useAtomValue(llmConfigAtom);
+
+  /** 翻译会话 Hook —— 串联音频→ASR→LLM→字幕 */
+  const { isTranslating, error, isConfigured, start, stop } = useTranslationSession(
+    asrConfig,
+    llmConfig,
+  );
 
   /** 加载应用版本信息 */
   const loadVersion = async (): Promise<void> => {
@@ -18,13 +33,18 @@ export function MainWindow(): JSX.Element {
     }
   };
 
-  /** 显示字幕悬浮窗 */
-  const showOverlay = async (): Promise<void> => {
+  /** 开始翻译：先显示浮窗，再启动管线 */
+  const handleStart = async (): Promise<void> => {
+    if (!isConfigured) {
+      return;
+    }
     await window.electronAPI?.showOverlay();
+    await start();
   };
 
-  /** 隐藏字幕悬浮窗 */
-  const hideOverlay = async (): Promise<void> => {
+  /** 停止翻译：停管线，隐藏浮窗 */
+  const handleStop = async (): Promise<void> => {
+    stop();
     await window.electronAPI?.hideOverlay();
   };
 
@@ -37,18 +57,34 @@ export function MainWindow(): JSX.Element {
         {APP_TAGLINE}
       </p>
 
+      {/* 状态信息 */}
+      {!isConfigured && (
+        <p className="text-yellow-400 text-xs mb-4">
+          ⚠ API Key 未配置，请前往设置页面配置
+        </p>
+      )}
+      {error && (
+        <p className="text-red-400 text-xs mb-4">
+          {error}
+        </p>
+      )}
+
       <div className="flex gap-3 mb-8">
         <button
-          onClick={showOverlay}
+          onClick={handleStart}
+          disabled={!isConfigured || isTranslating}
           className="px-6 py-2 bg-primary rounded-lg text-white font-medium
-                     hover:bg-primary-hover transition-colors"
+                     hover:bg-primary-hover transition-colors
+                     disabled:opacity-40 disabled:cursor-not-allowed"
         >
           ▶ 开始翻译
         </button>
         <button
-          onClick={hideOverlay}
+          onClick={handleStop}
+          disabled={!isTranslating}
           className="px-6 py-2 bg-gray-700 rounded-lg text-gray-300 font-medium
-                     hover:bg-gray-600 transition-colors"
+                     hover:bg-gray-600 transition-colors
+                     disabled:opacity-40 disabled:cursor-not-allowed"
         >
           ⏹ 停止
         </button>
