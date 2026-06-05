@@ -9,6 +9,7 @@ import { sharedContextAtom } from '../stores/shared-context';
 import { subtitleStackAtom } from '../stores/session-store';
 import type { SubtitleEntry } from '../types/subtitle';
 import { useAudioCapture } from './useAudioCapture';
+import type { AudioSource } from './useAudioCapture';
 import type { TranslationResult } from '../services/llm/types';
 
 /** Hook 返回值 */
@@ -34,6 +35,7 @@ export interface UseTranslationSessionReturn {
 export function useTranslationSession(
   asrConfig: ASRConfig | null,
   llmConfig: LLMConfig | null,
+  audioSource: AudioSource,
 ): UseTranslationSessionReturn {
   const [isTranslating, setIsTranslating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,8 +54,8 @@ export function useTranslationSession(
   /** 当前正在流式接收的字幕 ID，null 表示无进行中的句子 */
   const activeIdRef = useRef<number | null>(null);
 
-  /** 麦克风捕获（系统音频在调用时由 source 配置决定） */
-  const audioCapture = useAudioCapture({ source: 'microphone' });
+  /** 音频捕获——根据 audioSource 参数选择麦克风或系统音频 */
+  const audioCapture = useAudioCapture({ source: audioSource });
 
   const isConfigured = asrConfig !== null && llmConfig !== null;
 
