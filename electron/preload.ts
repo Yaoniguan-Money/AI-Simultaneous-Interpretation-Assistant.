@@ -8,4 +8,8 @@ import { IPC_CHANNELS } from '../shared/ipc-channels';
 contextBridge.exposeInMainWorld('electronAPI', {
   /** 获取应用版本 */
   getVersion: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.APP_GET_VERSION),
+  /** 显示字幕悬浮窗 */
+  showOverlay: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.OVERLAY_SHOW),
+  /** 隐藏字幕悬浮窗 */
+  hideOverlay: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.OVERLAY_HIDE),
 });
