@@ -11,3 +11,7 @@ Thumbs.db
 # 比赛相关文档仅本地保留，不提交到仓库
 方案设计文档.md
 AI 同声传译助手.txt
+credentials.md
+
+# Claude Code 本地配置
+.claude/

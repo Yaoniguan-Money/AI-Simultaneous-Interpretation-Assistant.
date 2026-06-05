@@ -3,10 +3,8 @@
  * 所有 IPC 通信的类型集中在此文件维护，保持前后端同步
  */
 
-/** IPC 通道名称常量 */
-export const IPC_CHANNELS = {
-  APP_GET_VERSION: 'app:getVersion',
-} as const;
+/** IPC 通道常量从 shared/ 重导出，主进程和渲染进程引用同一源 */
+export { IPC_CHANNELS } from '../../shared/ipc-channels';
 
 /** 音频捕获源 */
 export type AudioSource = 'system' | 'microphone';
