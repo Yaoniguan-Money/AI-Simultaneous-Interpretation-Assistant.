@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { APP_NAME, APP_TAGLINE } from '../shared/app-config';
 
 /** 应用根组件 — 主控制窗口入口 */
 function App(): JSX.Element {
@@ -17,10 +18,10 @@ function App(): JSX.Element {
   return (
     <div className="flex flex-col items-center justify-center h-full p-6 bg-gray-900">
       <h1 className="text-2xl font-bold text-white mb-2">
-        🎙️ AI 同声传译助手
+        {'🎙️ '}{APP_NAME}
       </h1>
       <p className="text-gray-400 text-sm mb-6">
-        英语实时翻译 · 流式字幕 · 自动修正
+        {APP_TAGLINE}
       </p>
 
       <div className="flex gap-3 mb-8">
