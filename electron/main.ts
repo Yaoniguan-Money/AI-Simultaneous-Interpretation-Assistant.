@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain } from 'electron';
 import path from 'path';
 import { IPC_CHANNELS } from '../shared/ipc-channels';
 import { APP_NAME } from '../shared/app-config';
@@ -65,4 +65,11 @@ ipcMain.handle(IPC_CHANNELS.OVERLAY_SHOW, () => {
 /** 隐藏字幕悬浮窗 */
 ipcMain.handle(IPC_CHANNELS.OVERLAY_HIDE, () => {
   hideOverlayWindow();
+});
+
+/** 获取桌面捕获源 ID——供渲染进程的系统音频捕获使用 */
+ipcMain.handle(IPC_CHANNELS.DESKTOP_GET_SOURCE_ID, async () => {
+  const sources = await desktopCapturer.getSources({ types: ['screen'] });
+  /** 返回第一个屏幕源 ID，渲染进程用此 ID 调用 getDisplayMedia */
+  return sources.length > 0 ? sources[0].id : null;
 });

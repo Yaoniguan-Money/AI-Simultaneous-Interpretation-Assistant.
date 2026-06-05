@@ -8,6 +8,8 @@ declare global {
     getVersion: () => Promise<string>;
     showOverlay: () => Promise<void>;
     hideOverlay: () => Promise<void>;
+    /** 获取桌面捕获源 ID（系统音频） */
+    getDesktopSourceId: () => Promise<string | null>;
   }
 
   interface Window {

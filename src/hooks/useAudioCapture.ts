@@ -83,13 +83,59 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { sampleRate, channelCount: cfg.channels ?? DEFAULTS.CHANNELS },
     });
+    await processStream(stream, sampleRate);
+  }, [stop]);
+
+  /**
+   * 系统音频捕获：桌面源 ID → getUserMedia（Chrome 桌面约束）→ AudioContext → PCM
+   * 首次使用弹出屏幕选择对话框（Chrome 安全策略），后续静默
+   */
+  const captureSystem = useCallback(async (cfg: AudioCaptureConfig): Promise<void> => {
+    /** 通过 IPC 获取桌面捕获源 ID */
+    const sourceId = await window.electronAPI?.getDesktopSourceId();
+    if (!sourceId) {
+      throw new Error('无法获取桌面捕获源，请确认屏幕共享权限');
+    }
+
+    const sampleRate = cfg.sampleRate ?? DEFAULTS.SAMPLE_RATE;
+    if (sampleRate <= 0) {
+      throw new Error(`无效的采样率: ${sampleRate}`);
+    }
+
+    /** Chrome 桌面捕获约束：捕获屏幕 + 系统音频 */
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: 'desktop' as unknown as string,
+          chromeMediaSourceId: sourceId,
+        },
+      } as MediaTrackConstraints,
+      video: {
+        mandatory: {
+          chromeMediaSource: 'desktop' as unknown as string,
+          chromeMediaSourceId: sourceId,
+        },
+      } as MediaTrackConstraints,
+    });
+
+    await processStream(stream, sampleRate);
+  }, [stop]);
+
+  /**
+   * 统一流处理：设备监听 → AudioContext → ScriptProcessor → Int16Array PCM
+   * 麦克风和系统音频共用此管道
+   */
+  const processStream = useCallback(async (
+    stream: MediaStream,
+    sampleRate: number,
+  ): Promise<void> => {
     streamRef.current = stream;
 
-    /** 监听设备拔出 */
+    /** 监听音频轨道断开 */
     const audioTrack = stream.getAudioTracks()[0];
     if (audioTrack) {
       audioTrack.onended = (): void => {
-        setError('音频设备已断开，请检查麦克风');
+        setError('音频设备已断开，请检查音频源');
         stop();
       };
     }
@@ -121,13 +167,13 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
       if (cfg.source === 'microphone') {
         await captureMicrophone(cfg);
       } else {
-        setError('系统音频捕获暂未实现，请使用麦克风模式');
+        await captureSystem(cfg);
       }
     } catch (err) {
       setIsCapturing(false);
       setError(err instanceof Error ? err.message : '音频设备启动失败');
     }
-  }, [isCapturing, captureMicrophone]);
+  }, [isCapturing, captureMicrophone, captureSystem]);
 
   /** 组件卸载时自动停止 */
   useEffect(() => {
