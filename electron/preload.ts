@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import { IPC_CHANNELS } from '../shared/ipc-channels';
 
 /**
  * 通过 contextBridge 向渲染进程暴露安全的 API
@@ -6,5 +7,5 @@ import { contextBridge, ipcRenderer } from 'electron';
  */
 contextBridge.exposeInMainWorld('electronAPI', {
   /** 获取应用版本 */
-  getVersion: (): Promise<string> => ipcRenderer.invoke('app:getVersion'),
+  getVersion: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.APP_GET_VERSION),
 });

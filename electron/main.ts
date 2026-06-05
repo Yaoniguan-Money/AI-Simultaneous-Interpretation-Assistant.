@@ -1,5 +1,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
+import { IPC_CHANNELS } from '../shared/ipc-channels';
+import { APP_NAME } from '../shared/app-config';
 
 /** 主控制窗口引用 */
 let mainWindow: BrowserWindow | null = null;
@@ -10,7 +12,7 @@ function createMainWindow(): void {
     width: 420,
     height: 600,
     resizable: true,
-    title: 'AI 同声传译助手',
+    title: APP_NAME,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -47,4 +49,4 @@ app.on('window-all-closed', () => {
 // ---- IPC 通道定义（预留，后续 PR 扩展） ----
 
 /** 示例 IPC handler：获取应用版本 */
-ipcMain.handle('app:getVersion', () => app.getVersion());
+ipcMain.handle(IPC_CHANNELS.APP_GET_VERSION, () => app.getVersion());
