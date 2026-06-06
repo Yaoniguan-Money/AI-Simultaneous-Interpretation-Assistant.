@@ -88,20 +88,25 @@ export function useTranslationSession(
       setSubtitleStack((prev) => {
         const activeId = activeIdRef.current;
         if (activeId !== null) {
-          /** 流式 token：更新当前活跃字幕 */
+          /** 流式 token：更新当前活跃字幕——首 token 携带的原文覆盖 interim 的粗略识别结果 */
           return prev.map((e) =>
             e.id === activeId
-              ? { ...e, translation: result.translation, isComplete: result.tokens.length === 0 }
+              ? {
+                  ...e,
+                  translation: result.translation,
+                  original: result.originalText ?? e.original,
+                  isComplete: result.tokens.length === 0,
+                }
               : e,
           );
         }
-        /** 新句子：创建新字幕条目 */
+        /** 新句子：创建新字幕条目——英文原文由管道 originalText 提供 */
         const id = ++idCounterRef.current;
         activeIdRef.current = id;
         const entry: SubtitleEntry = {
           id,
           timestamp: Date.now(),
-          original: '',
+          original: result.originalText ?? '',
           translation: result.translation,
           isComplete: result.tokens.length === 0,
           correction: null,
@@ -109,13 +114,13 @@ export function useTranslationSession(
         return [...prev, entry];
       });
 
-      /** 句子完成后重置活跃 ID 并追加到持久化历史 */
+      /** 句子完成后重置活跃 ID 并追加到持久化历史——英文原文由管道 originalText 提供 */
       if (result.tokens.length === 0) {
         activeIdRef.current = null;
         setHistory((prev) => [...prev, {
           id: idCounterRef.current,
           timestamp: Date.now(),
-          original: '',
+          original: result.originalText ?? '',
           translation: result.translation,
           isComplete: true,
           correction: null,

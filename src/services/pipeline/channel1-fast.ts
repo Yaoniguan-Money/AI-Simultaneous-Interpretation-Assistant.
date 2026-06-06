@@ -20,6 +20,9 @@ const DEFAULTS = {
   HISTORY_SIZE: 5,
   /** 环形缓冲区容量——8 个 chunk × 128ms ≈ 1s 缓冲深度 */
   RING_BUFFER_CAPACITY: 8,
+  /** 强制交付阈值（毫秒）——ASR 连续发 interim 超此时间未发 final，
+   *  取最新 interim 作为伪 final 送入分段器，避免长句长时间无翻译 */
+  FORCE_DELIVERY_MS: 3000,
 } as const;
 
 /** 翻译结果回调 */
@@ -47,6 +50,10 @@ export class FastChannelPipeline {
   private active = false;
   /** 消费锁：防止并发 consumeNext 调用——环形缓冲区已解决音频丢弃问题，此锁仅防并发内部状态冲突 */
   private processing = false;
+  /** 上次收到 ASR final 结果的时间戳——用于检测长时间无 final 的 interim 洪水 */
+  private lastFinalTimestamp = 0;
+  /** 最新一条 interim 文本，长时间无 final 时作为伪 final 送入分段器 */
+  private latestInterimText = '';
 
   constructor(
     private asr: ASRProvider,
@@ -87,6 +94,8 @@ export class FastChannelPipeline {
     this.ringBuffer.clear();
     this.segmenter.reset();
     this.translatedSentences = [];
+    this.lastFinalTimestamp = 0;
+    this.latestInterimText = '';
     /** 释放外部资源：ASR WebSocket 连接和 LLM 进行中的 HTTP 流 */
     this.asr.dispose();
     this.llm.dispose();
@@ -139,10 +148,22 @@ export class FastChannelPipeline {
       if (!asrResult.text) return;
 
       if (!asrResult.isFinal) {
-        /** interim 结果：直接推送给字幕 UI 展示原文，不进入分句器 */
+        /** interim 结果：保存最新文本，推送 UI 展示原文，不进入分句器 */
+        this.latestInterimText = asrResult.text;
         this.interimCallbacks.forEach((cb) => cb(asrResult.text));
+        /** 长时间无 final 则强制交付——取最新 interim 作为伪 final 送入分段器 */
+        if (
+          this.lastFinalTimestamp > 0 &&
+          Date.now() - this.lastFinalTimestamp > DEFAULTS.FORCE_DELIVERY_MS
+        ) {
+          await this.forceDeliverInterim(item.timestamp);
+        }
         return;
       }
+
+      /** 记录 final 到达时间，重置强制交付状态 */
+      this.lastFinalTimestamp = Date.now();
+      this.latestInterimText = '';
 
       /** 第二步：语义分句——仅 final 结果参与 */
       const sentences = this.segmenter.push(
@@ -183,6 +204,25 @@ export class FastChannelPipeline {
     }
   }
 
+  /**
+   * 强制交付当前 interim 文本为伪 final（修复 B4：长句憋字）
+   * 当 ASR 长时间只发 interim 不发 final 时（连续说话无自然停顿），
+   * 取最新 interim 文本送入分段器，避免中文字幕长时间空白。
+   * 触发条件：上次 final 距今超过 FORCE_DELIVERY_MS（3s）。
+   */
+  private async forceDeliverInterim(timestamp: number): Promise<void> {
+    const text = this.latestInterimText;
+    this.latestInterimText = '';
+    this.lastFinalTimestamp = Date.now();
+    if (!text) return;
+
+    const sentences = this.segmenter.push(text, timestamp, true);
+    for (const sentence of sentences) {
+      if (!this.active) break;
+      await this.translateSentence(sentence);
+    }
+  }
+
   /** 刷新缓冲，翻译剩余未交付的文本 */
   async flush(): Promise<void> {
     const remaining = this.segmenter.flush();
@@ -198,11 +238,17 @@ export class FastChannelPipeline {
     const request = this.buildTranslationRequest(text);
     let finalResult: TranslationResult | null = null;
 
+    let isFirstToken = true;
     try {
       for await (const result of this.llm.translate(request)) {
+        /** 首个流式 token 携带原文文本，供字幕层展示英文（修复 B3：译文条目丢失 original 字段） */
+        const enriched: TranslationResult = isFirstToken
+          ? { ...result, originalText: text }
+          : result;
+        isFirstToken = false;
         /** 流式中间结果实时通知（打字机效果） */
-        this.translationCallbacks.forEach((cb) => cb(result));
-        finalResult = result;
+        this.translationCallbacks.forEach((cb) => cb(enriched));
+        finalResult = enriched;
       }
     } catch (error) {
       this.handleError(error);

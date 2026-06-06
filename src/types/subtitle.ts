@@ -20,3 +20,15 @@ export interface SubtitleCorrection {
   newText: string;
   reason: string;
 }
+
+/**
+ * 字幕 IPC 推送负载 —— MainWindow → 主进程 → OverlayWindow
+ * 将渲染所需全部数据（字幕条目 + 双语开关）单次传输，
+ * 避免 Jotai atom 无法跨 Electron 进程共享的问题
+ */
+export interface SubtitlePayload {
+  /** 字幕堆栈数组 */
+  entries: SubtitleEntry[];
+  /** 双语字幕开关状态 */
+  bilingual: boolean;
+}

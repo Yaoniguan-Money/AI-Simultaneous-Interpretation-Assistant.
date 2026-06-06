@@ -1,16 +1,20 @@
 import { useAtomValue } from 'jotai';
 import { useEffect } from 'react';
 import { subtitleStackAtom } from '../stores/session-store';
+import { bilingualAtom } from '../stores/settings-store';
+import type { SubtitlePayload } from '../types/subtitle';
 
 /**
- * 字幕同步 Hook——监听本地 subtitleStackAtom 变化并通过 IPC 推送到 OverlayWindow
- * 在 MainWindow 组件树中使用，使得翻译管线或 Demo 播放器产出的字幕自动同步到悬浮窗
- * 不关心字幕来源——无论实时翻译还是演示模式，只要 atom 变化就自动推送
+ * 字幕同步 Hook——监听本地 subtitleStackAtom 和 bilingualAtom 变化，
+ * 构造 SubtitlePayload 并通过 IPC 推送到 OverlayWindow。
+ * 解决 Jotai atom 无法跨 Electron 进程共享的架构缺陷（修复 B1）。
  */
 export function useSubtitleSync(): void {
   const stack = useAtomValue(subtitleStackAtom);
+  const bilingual = useAtomValue(bilingualAtom);
 
   useEffect(() => {
-    window.electronAPI?.sendSubtitleUpdate(stack);
-  }, [stack]);
+    const payload: SubtitlePayload = { entries: stack, bilingual };
+    window.electronAPI?.sendSubtitleUpdate(payload);
+  }, [stack, bilingual]);
 }
