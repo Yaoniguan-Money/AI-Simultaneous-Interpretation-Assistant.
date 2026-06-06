@@ -49,12 +49,12 @@ export function createOverlayWindow(): BrowserWindow {
   /** 鼠标穿透——默认点击事件透传到下层窗口 */
   overlayWindow.setIgnoreMouseEvents(true, { forward: true });
 
-  /** 加载悬浮窗页面（hash 路由） */
-  const url = process.env.VITE_DEV_SERVER_URL
-    ? `${process.env.VITE_DEV_SERVER_URL}#overlay`
-    : `file://${path.join(__dirname, '../dist/index.html')}#overlay`;
-
-  overlayWindow.loadURL(url);
+  /** 加载悬浮窗页面（hash 路由）。开发模式用 dev server URL，生产模式用 loadFile 确保 ASAR 文件协议兼容 */
+  if (process.env.VITE_DEV_SERVER_URL) {
+    overlayWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL}#overlay`);
+  } else {
+    overlayWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: 'overlay' });
+  }
 
   /** 窗口关闭时置空引用 */
   overlayWindow.on('closed', () => {
