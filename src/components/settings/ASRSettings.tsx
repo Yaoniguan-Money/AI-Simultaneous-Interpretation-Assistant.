@@ -1,10 +1,10 @@
 import { useAtom } from 'jotai';
-import { useEffect, useState } from 'react';
 import type { ASRConfig, ASRProviderType } from '../../services/asr/types';
 import { createASRProvider } from '../../services/asr/factory';
 import { asrConfigAtom } from '../../stores/settings-store';
+import { useConnectionTest } from '../../hooks/useConnectionTest';
 import { ApiKeyInput } from './ApiKeyInput';
-import { TestStatusBadge, type TestStatus } from './TestStatus';
+import { TestStatusBadge } from './TestStatus';
 
 /** 可选的 ASR 提供商 */
 const PROVIDERS: { key: ASRProviderType; label: string; sub: string }[] = [
@@ -22,14 +22,18 @@ function defaultConfig(provider: ASRProviderType): ASRConfig {
 /** ASR 提供商配置面板 */
 export function ASRSettings(): JSX.Element {
   const [config, setConfig] = useAtom(asrConfigAtom);
-  const [testStatus, setTestStatus] = useState<TestStatus>('idle');
+  const { testStatus, errorMessage, testConnection, resetStatus } = useConnectionTest(
+    asrConfigAtom,
+    createASRProvider,
+    '请先填写 ASR 凭证再测试',
+  );
 
   const current = config ?? defaultConfig('iflytek');
 
   /** 切换提供商 */
   const selectProvider = (key: ASRProviderType): void => {
     setConfig(defaultConfig(key));
-    setTestStatus('idle');
+    resetStatus();
   };
 
   /** 更新凭证字段 */
@@ -39,30 +43,6 @@ export function ASRSettings(): JSX.Element {
       return { ...base, credentials: { ...base.credentials, [field]: value } };
     });
   };
-
-  /** 测试连接——处理工厂不支持当前 provider 的情况 */
-  const testConnection = async (): Promise<void> => {
-    if (!config) return;
-    setTestStatus('testing');
-    try {
-      const provider = createASRProvider(config);
-      const ok = await provider.validateCredentials(config);
-      provider.dispose();
-      setTestStatus(ok ? 'ok' : 'fail');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Connection failed';
-      setTestStatus('fail');
-      void message;
-    }
-  };
-
-  /** 测试徽章 5 秒后自动消失 */
-  useEffect(() => {
-    if (testStatus === 'ok' || testStatus === 'fail') {
-      const timer = setTimeout(() => setTestStatus('idle'), 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [testStatus]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -93,6 +73,7 @@ export function ASRSettings(): JSX.Element {
       {current.provider === 'iflytek' && (
         <>
           <ApiKeyInput label="App ID" value={current.credentials['appId'] ?? ''} onChange={(v) => updateCred('appId', v)} />
+          <ApiKeyInput label="API Key" value={current.credentials['apiKey'] ?? ''} onChange={(v) => updateCred('apiKey', v)} />
           <ApiKeyInput label="API Secret" value={current.credentials['apiSecret'] ?? ''} onChange={(v) => updateCred('apiSecret', v)} />
         </>
       )}
@@ -110,7 +91,7 @@ export function ASRSettings(): JSX.Element {
       )}
 
       {/* 测试连接 */}
-      <TestStatusBadge status={testStatus} onTest={testConnection} />
+      <TestStatusBadge status={testStatus} onTest={testConnection} errorMessage={errorMessage} />
     </div>
   );
 }

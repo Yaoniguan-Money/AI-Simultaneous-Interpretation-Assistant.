@@ -1,10 +1,11 @@
 import { useAtom } from 'jotai';
-import { useEffect, useRef, useState } from 'react';
+import { useRef } from 'react';
 import type { LLMConfig, LLMProviderType } from '../../services/llm/types';
 import { createLLMProvider } from '../../services/llm/factory';
 import { llmConfigAtom } from '../../stores/settings-store';
+import { useConnectionTest } from '../../hooks/useConnectionTest';
 import { ApiKeyInput } from './ApiKeyInput';
-import { TestStatusBadge, type TestStatus } from './TestStatus';
+import { TestStatusBadge } from './TestStatus';
 
 /** 可选的 LLM 提供商 */
 const PROVIDERS: { key: LLMProviderType; label: string; sub: string }[] = [
@@ -22,7 +23,11 @@ function defaultConfig(provider: LLMProviderType): LLMConfig {
 /** LLM 提供商配置面板 */
 export function LLMSettings(): JSX.Element {
   const [config, setConfig] = useAtom(llmConfigAtom);
-  const [testStatus, setTestStatus] = useState<TestStatus>('idle');
+  const { testStatus, errorMessage, testConnection, resetStatus } = useConnectionTest(
+    llmConfigAtom,
+    createLLMProvider,
+    '请先填写 LLM API Key 再测试',
+  );
   /** Model 输入框 ref，用于 onBlur 时读取值 */
   const modelInputRef = useRef<HTMLInputElement>(null);
 
@@ -30,7 +35,7 @@ export function LLMSettings(): JSX.Element {
 
   const selectProvider = (key: LLMProviderType): void => {
     setConfig(defaultConfig(key));
-    setTestStatus('idle');
+    resetStatus();
   };
 
   const updateCred = (field: string, value: string): void => {
@@ -46,29 +51,6 @@ export function LLMSettings(): JSX.Element {
       return { ...base, model };
     });
   };
-
-  const testConnection = async (): Promise<void> => {
-    if (!config) return;
-    setTestStatus('testing');
-    try {
-      const provider = createLLMProvider(config);
-      const ok = await provider.validateCredentials(config);
-      provider.dispose();
-      setTestStatus(ok ? 'ok' : 'fail');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Connection failed';
-      setTestStatus('fail');
-      void message;
-    }
-  };
-
-  /** 测试徽章 5 秒后自动消失 */
-  useEffect(() => {
-    if (testStatus === 'ok' || testStatus === 'fail') {
-      const timer = setTimeout(() => setTestStatus('idle'), 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [testStatus]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -116,7 +98,7 @@ export function LLMSettings(): JSX.Element {
         </div>
       )}
 
-      <TestStatusBadge status={testStatus} onTest={testConnection} />
+      <TestStatusBadge status={testStatus} onTest={testConnection} errorMessage={errorMessage} />
     </div>
   );
 }

@@ -9,9 +9,9 @@ export type ASRProviderType = 'iflytek' | 'aliyun' | 'deepgram' | 'custom';
 /** ASR 供应商配置——不同供应商需要不同凭证字段 */
 export interface ASRConfig {
   provider: ASRProviderType;
-  /** 凭证键值对，如 { appId, apiSecret }，字段名随供应商而异 */
+  /** 凭证键值对，如 { appId, apiKey, apiSecret }，字段名随供应商而异 */
   credentials: Record<string, string>;
-  /** 接口端点，如 https://raasr.xfyun.cn/v2/api/xxx */
+  /** 接口端点，如 wss://iat-api.xfyun.cn/v2/iat（WebSocket） */
   endpoint?: string;
   /** 识别语言，如 'en' | 'zh' */
   language?: string;
