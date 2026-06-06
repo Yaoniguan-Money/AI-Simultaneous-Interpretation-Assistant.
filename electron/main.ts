@@ -1,4 +1,5 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage } from 'electron';
+import fs from 'fs';
 import path from 'path';
 import { IPC_CHANNELS } from '../shared/ipc-channels';
 import { APP_NAME } from '../shared/app-config';
@@ -72,4 +73,31 @@ ipcMain.handle(IPC_CHANNELS.DESKTOP_GET_SOURCE_ID, async () => {
   const sources = await desktopCapturer.getSources({ types: ['screen'] });
   /** 返回第一个屏幕源 ID，渲染进程用此 ID 调用 getDisplayMedia */
   return sources.length > 0 ? sources[0].id : null;
+});
+
+/** 凭证文件路径 */
+const credPath = path.join(app.getPath('userData'), 'credentials.enc');
+
+/** 加密保存凭证 */
+ipcMain.handle(IPC_CHANNELS.CREDENTIALS_SAVE, async (_event, data: string) => {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  try {
+    const encrypted = safeStorage.encryptString(data);
+    fs.writeFileSync(credPath, encrypted);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+/** 加载并解密凭证 */
+ipcMain.handle(IPC_CHANNELS.CREDENTIALS_LOAD, async () => {
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try {
+    if (!fs.existsSync(credPath)) return null;
+    const encrypted = fs.readFileSync(credPath);
+    return safeStorage.decryptString(encrypted);
+  } catch {
+    return null;
+  }
 });
