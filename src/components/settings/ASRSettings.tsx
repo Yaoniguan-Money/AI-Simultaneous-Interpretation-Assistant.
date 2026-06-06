@@ -67,7 +67,7 @@ export function ASRSettings(): JSX.Element {
   return (
     <div className="flex flex-col gap-4">
       <h3 className="text-xs font-bold text-text-muted uppercase tracking-[0.06em]">
-        Speech Recognition (ASR)
+        语音识别 (ASR)
       </h3>
 
       {/* 提供商选择 */}

@@ -150,7 +150,7 @@ export function DemoPlayer({ onBack }: { onBack: () => void }): JSX.Element {
         onClick={() => { cleanup(); onBack(); }}
         className="text-xs text-text-muted hover:text-text-primary transition-colors mb-4"
       >
-        Back
+        返回
       </button>
 
       {/* 模拟视频区域 */}
@@ -159,11 +159,11 @@ export function DemoPlayer({ onBack }: { onBack: () => void }): JSX.Element {
         <div className="text-center">
           <p className="text-[#C9D1D9] text-sm font-mono mb-2">
             {/* Python code snippet */}
-            <span className="text-[#8B949E]"># Python Garbage Collection Demo</span><br />
+            <span className="text-[#8B949E]"># Python 垃圾回收演示</span><br />
             <span className="text-[#FF7B72]">import</span> <span className="text-[#C9D1D9]">gc</span><br />
             <span className="text-[#C9D1D9]">a = [</span><span className="text-[#A5D6FF]">1</span><span className="text-[#C9D1D9]">, </span><span className="text-[#A5D6FF]">2</span><span className="text-[#C9D1D9]">, </span><span className="text-[#A5D6FF]">3</span><span className="text-[#C9D1D9]">]</span><br />
-            <span className="text-[#C9D1D9]">b = a &nbsp;</span><span className="text-[#8B949E]"># b references the same list as a</span><br />
-            <span className="text-[#FF7B72]">del</span> <span className="text-[#C9D1D9]">a &nbsp;</span><span className="text-[#8B949E]"># reference count drops, but list still referenced by b</span><br />
+            <span className="text-[#C9D1D9]">b = a &nbsp;</span><span className="text-[#8B949E]"># b 引用了与 a 相同的列表</span><br />
+            <span className="text-[#FF7B72]">del</span> <span className="text-[#C9D1D9]">a &nbsp;</span><span className="text-[#8B949E]"># 引用计数降低，但列表仍被 b 引用</span><br />
             <span className="text-[#C9D1D9]">print(</span><span className="text-[#D2A8FF]">gc.get_referrers</span><span className="text-[#C9D1D9]">(b))</span>
           </p>
         </div>
@@ -173,7 +173,7 @@ export function DemoPlayer({ onBack }: { onBack: () => void }): JSX.Element {
           <div className="absolute top-3 right-3 flex items-center gap-1.5
                           px-2 py-1 rounded-full bg-[rgba(0,0,0,0.4)] backdrop-blur">
             <span className="w-2 h-2 rounded-full bg-[#34D399] animate-pulse" />
-            <span className="text-[10px] text-[#34D399] font-medium">Playing Demo</span>
+            <span className="text-[10px] text-[#34D399] font-medium">演示播放中</span>
           </div>
         )}
       </div>
@@ -185,7 +185,7 @@ export function DemoPlayer({ onBack }: { onBack: () => void }): JSX.Element {
           className="px-5 py-2 rounded-btn bg-black text-white text-xs font-semibold
                      hover:bg-[#333] transition-colors"
         >
-          {isPlaying ? 'Stop' : 'Play Demo'}
+          {isPlaying ? '停止' : '播放演示'}
         </button>
         <div className="flex-1 h-1.5 rounded-full bg-surface-muted overflow-hidden">
           <div
@@ -199,7 +199,7 @@ export function DemoPlayer({ onBack }: { onBack: () => void }): JSX.Element {
       </div>
 
       <p className="text-[10px] text-text-faded text-center">
-        Offline demo &middot; No API key required &middot; Typewriter + correction animation
+        离线演示 &middot; 无需 API Key &middot; 打字机效果 + 修正动画
       </p>
     </div>
   );

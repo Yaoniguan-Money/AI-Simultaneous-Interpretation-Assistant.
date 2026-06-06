@@ -17,7 +17,7 @@ export function TestStatusBadge({
         className="px-4 py-2 rounded-btn border border-border text-xs font-medium
                    hover:bg-surface-hover transition-colors disabled:opacity-50"
       >
-        {status === 'testing' ? 'Testing...' : 'Test Connection'}
+        {status === 'testing' ? '测试中...' : '测试连接'}
       </button>
       {status === 'ok' && (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-chip

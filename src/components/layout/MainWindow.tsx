@@ -91,7 +91,7 @@ export function MainWindow(): JSX.Element {
           onClick={loadVersion}
           className="mt-auto pt-3 text-[10px] text-text-faded font-mono hover:text-text-muted transition-colors text-center"
         >
-          {appVersion ? `v${appVersion}` : 'Click to check version'}
+          {appVersion ? `v${appVersion}` : '点击查看版本'}
         </button>
       </div>
     </div>
@@ -128,12 +128,12 @@ function MainView({
       {isTranslating && (
         <p className="text-xs text-accent-green-text mb-3 flex items-center gap-1.5">
           <span className="w-1.5 h-1.5 rounded-full bg-accent-green-text animate-pulse" />
-          Translating
+          正在翻译中
         </p>
       )}
       {!isConfigured && (
         <p className="text-xs text-accent-yellow-text mb-3">
-          API Key not configured. Go to Settings to configure.
+          API Key 未配置，请前往「API 设置」配置
         </p>
       )}
       {error && (
@@ -151,7 +151,7 @@ function MainView({
               : 'border border-transparent bg-surface-muted text-text-muted hover:bg-surface-hover')
           }
         >
-          System Audio
+          系统音频
         </button>
         <button
           onClick={() => onAudioSourceChange('microphone')}
@@ -162,7 +162,7 @@ function MainView({
               : 'border border-transparent bg-surface-muted text-text-muted hover:bg-surface-hover')
           }
         >
-          Microphone
+          麦克风
         </button>
       </div>
 
@@ -175,7 +175,7 @@ function MainView({
                      hover:bg-[#333] transition-all active:scale-[0.98]
                      disabled:opacity-25 disabled:cursor-not-allowed disabled:scale-100"
         >
-          Start Translation
+          开始翻译
         </button>
         <button
           onClick={onStop}
@@ -184,7 +184,7 @@ function MainView({
                      hover:bg-surface-hover transition-all
                      disabled:opacity-25 disabled:cursor-not-allowed"
         >
-          Stop
+          停止
         </button>
       </div>
 
@@ -197,14 +197,14 @@ function MainView({
           className="w-4 h-4 rounded-[3px] border-[1.5px] border-border
                      checked:bg-black accent-black"
         />
-        Bilingual Subtitles (Original + Translation)
+        双语字幕（原文 + 译文）
       </label>
 
       {/* 菜单卡片 */}
       <div className="w-full space-y-1.5">
-        <MenuCard label="Translation History" onClick={() => onNavigate('history')} />
-        <MenuCard label="API Settings" onClick={() => onNavigate('settings')} />
-        <MenuCard label="Demo Mode" onClick={() => onNavigate('demo')} />
+        <MenuCard label="翻译历史" onClick={() => onNavigate('history')} />
+        <MenuCard label="API 设置" onClick={() => onNavigate('settings')} />
+        <MenuCard label="演示模式" onClick={() => onNavigate('demo')} />
       </div>
     </div>
   );
@@ -231,14 +231,14 @@ function SettingsView({ onBack }: { onBack: () => void }): JSX.Element {
         onClick={onBack}
         className="text-xs text-text-muted hover:text-text-primary transition-colors mb-5"
       >
-        Back
+        返回
       </button>
       <div className="flex flex-col gap-6">
         <ASRSettings />
         <div className="h-px bg-border" />
         <LLMSettings />
         <p className="text-[10px] text-text-faded text-center mt-2">
-          All keys encrypted locally &middot; Never uploaded
+          所有密钥加密存储在本机，不上传云端
         </p>
       </div>
     </div>

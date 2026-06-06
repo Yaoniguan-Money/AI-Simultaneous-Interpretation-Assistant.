@@ -20,7 +20,7 @@ export function SummaryCard(): JSX.Element {
   return (
     <div className="rounded-card border border-border p-4 bg-[rgba(99,102,241,0.04)]">
       <h4 className="text-[10px] font-bold uppercase tracking-[0.05em] text-[rgba(99,102,241,0.6)] mb-2">
-        Channel 2 Analysis
+        Channel 2 分析摘要
       </h4>
       {domain && (
         <p className="text-sm font-semibold text-text-primary">

@@ -73,7 +73,7 @@ export function LLMSettings(): JSX.Element {
   return (
     <div className="flex flex-col gap-4">
       <h3 className="text-xs font-bold text-text-muted uppercase tracking-[0.06em]">
-        Translation (LLM)
+        翻译模型 (LLM)
       </h3>
 
       <div className="flex gap-2">
