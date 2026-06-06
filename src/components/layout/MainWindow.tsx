@@ -8,6 +8,7 @@ import {
   llmConfigAtom,
 } from '../../stores/settings-store';
 import { useTranslationSession } from '../../hooks/useTranslationSession';
+import { useCredentialPersistence } from '../../hooks/useCredentialPersistence';
 import { ASRSettings } from '../settings/ASRSettings';
 import { LLMSettings } from '../settings/LLMSettings';
 import { HistoryPanel } from '../history/HistoryPanel';
@@ -24,6 +25,9 @@ export function MainWindow(): JSX.Element {
 
   const asrConfig = useAtomValue(asrConfigAtom);
   const llmConfig = useAtomValue(llmConfigAtom);
+
+  /** 凭证持久化：保存/恢复加密的 API Key */
+  useCredentialPersistence();
 
   const { isTranslating, error, isConfigured, start, stop } = useTranslationSession(
     asrConfig,

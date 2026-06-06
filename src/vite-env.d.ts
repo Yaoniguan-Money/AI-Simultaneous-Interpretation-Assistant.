@@ -10,6 +10,10 @@ declare global {
     hideOverlay: () => Promise<void>;
     /** 获取桌面捕获源 ID（系统音频） */
     getDesktopSourceId: () => Promise<string | null>;
+    /** 加密保存凭证到本地 */
+    saveCredentials: (data: string) => Promise<boolean>;
+    /** 从本地加载解密凭证 */
+    loadCredentials: () => Promise<string | null>;
   }
 
   interface Window {
