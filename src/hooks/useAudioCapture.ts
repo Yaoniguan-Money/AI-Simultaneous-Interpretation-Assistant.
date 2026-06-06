@@ -187,7 +187,8 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
  * Float32Array（范围 -1.0 ~ 1.0）转 Int16Array（范围 -32768 ~ 32767）
  * 方案 4.3 要求输出 16-bit PCM
  */
-function float32ToInt16(float32: Float32Array): Int16Array {
+/** Float32Array → Int16Array，公共工具函数 */
+export function float32ToInt16(float32: Float32Array): Int16Array {
   const len = float32.length;
   const int16 = new Int16Array(len);
   for (let i = 0; i < len; i++) {
