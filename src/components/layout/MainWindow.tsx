@@ -34,7 +34,7 @@ export function MainWindow(): JSX.Element {
   /** 字幕同步：监听 subtitleStackAtom 变化并通过 IPC 推送到 OverlayWindow */
   useSubtitleSync();
 
-  const { isTranslating, error, isConfigured, start, stop } = useTranslationSession(
+  const { isTranslating, isStarting, error, isConfigured, start, stop } = useTranslationSession(
     asrConfig,
     llmConfig,
     audioSource,
@@ -49,10 +49,11 @@ export function MainWindow(): JSX.Element {
     }
   };
 
+  /** 启动翻译——先 start() 再 showOverlay()，确保 getDisplayMedia 在用户手势有效期内调用 */
   const handleStart = async (): Promise<void> => {
     if (!isConfigured) return;
-    await window.electronAPI?.showOverlay();
     await start();
+    await window.electronAPI?.showOverlay();
   };
 
   const handleStop = async (): Promise<void> => {
@@ -78,6 +79,7 @@ export function MainWindow(): JSX.Element {
         ) : (
           <MainView
             isTranslating={isTranslating}
+            isStarting={isStarting}
             isConfigured={isConfigured}
             error={error}
             bilingual={bilingual}
@@ -106,10 +108,11 @@ export function MainWindow(): JSX.Element {
 
 /** 主视图（默认） */
 function MainView({
-  isTranslating, isConfigured, error, bilingual, audioSource, onBilingualChange,
+  isTranslating, isStarting, isConfigured, error, bilingual, audioSource, onBilingualChange,
   onAudioSourceChange, onStart, onStop, onNavigate,
 }: {
   isTranslating: boolean;
+  isStarting: boolean;
   isConfigured: boolean;
   error: string | null;
   bilingual: boolean;
@@ -128,7 +131,13 @@ function MainView({
         <p className="text-[13px] text-text-muted mt-1">{APP_TAGLINE}</p>
       </div>
 
-      {/* 状态栏 */}
+      {/* 状态栏——根据翻译会话的生命周期展示不同状态 */}
+      {isStarting && !isTranslating && (
+        <p className="text-xs text-accent-blue-text mb-3 flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-accent-blue-text animate-pulse" />
+          正在启动音频捕获...
+        </p>
+      )}
       {isTranslating && (
         <p className="text-xs text-accent-green-text mb-3 flex items-center gap-1.5">
           <span className="w-1.5 h-1.5 rounded-full bg-accent-green-text animate-pulse" />
@@ -170,11 +179,18 @@ function MainView({
         </button>
       </div>
 
+      {/* 系统音频模式说明——告知用户无需等待选择器弹窗 */}
+      {audioSource === 'system' && !isTranslating && !isStarting && (
+        <p className="text-[11px] text-text-faded text-center mb-3 -mt-2">
+          系统音频将在后台自动捕获，无需选择窗口
+        </p>
+      )}
+
       {/* 开始/停止按钮 */}
       <div className="flex gap-2 w-full mb-4">
         <button
           onClick={onStart}
-          disabled={!isConfigured || isTranslating}
+          disabled={!isConfigured || isStarting || isTranslating}
           className="flex-1 py-3.5 rounded-btn bg-black text-white text-[14px] font-semibold
                      hover:bg-[#333] transition-all active:scale-[0.98]
                      disabled:opacity-25 disabled:cursor-not-allowed disabled:scale-100"

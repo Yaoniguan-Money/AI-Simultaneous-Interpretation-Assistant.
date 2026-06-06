@@ -16,7 +16,7 @@ export function SubtitleLine({
     <div className="flex flex-col items-center gap-0.5">
       {/* 英文原文（双语模式） */}
       {showOriginal && entry.original && (
-        <p className="text-subtitle-sm text-subtitle-faded text-center leading-relaxed max-w-full break-words px-6">
+        <p className="bg-subtitle-bg px-4 py-1 rounded-lg text-subtitle-sm text-subtitle-faded text-center leading-relaxed max-w-full break-words">
           {entry.original}
         </p>
       )}
@@ -29,7 +29,7 @@ export function SubtitleLine({
           initial={{ opacity: 0 }}
           animate={{ opacity: entry.isComplete ? 1 : 0.9 }}
           transition={{ duration: 0.2 }}
-          className="text-subtitle-md text-subtitle-text font-medium text-center leading-relaxed max-w-full break-words px-6"
+          className="bg-subtitle-bg px-4 py-1.5 rounded-lg text-subtitle-md text-subtitle-text font-medium text-center leading-relaxed max-w-full break-words"
         >
           {entry.translation}
         </motion.p>
@@ -55,7 +55,7 @@ function CorrectionTransition({ entry }: { entry: SubtitleEntry }): JSX.Element 
           initial={{ opacity: 1, color: '#FFFFFF' }}
           animate={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
-          className="text-subtitle-sm line-through text-subtitle-faded text-center leading-relaxed max-w-full break-words px-6"
+          className="bg-subtitle-bg px-4 py-1.5 rounded-lg text-subtitle-sm line-through text-subtitle-faded text-center leading-relaxed max-w-full break-words"
         >
           {entry.correction.oldText}
         </motion.p>
@@ -64,7 +64,7 @@ function CorrectionTransition({ entry }: { entry: SubtitleEntry }): JSX.Element 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.2, delay: 0.2 }}
-          className="text-subtitle-md text-subtitle-text font-medium text-center leading-relaxed max-w-full break-words px-6"
+          className="bg-subtitle-bg px-4 py-1.5 rounded-lg text-subtitle-md text-subtitle-text font-medium text-center leading-relaxed max-w-full break-words"
         >
           {entry.translation}
         </motion.p>

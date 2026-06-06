@@ -20,6 +20,12 @@ const DEFAULTS = {
   BUFFER_SIZE: 4096,
   /** 16-bit PCM 最大值 */
   PCM16_MAX: 32767,
+  /** 静音超时阈值（毫秒），超过此时间无有效音频输入则上报错误 */
+  SILENT_TIMEOUT_MS: 5000,
+  /** 静音检测检查间隔（毫秒） */
+  SILENT_CHECK_INTERVAL: 1000,
+  /** 有效音频阈值——采样振幅超过此值的缓冲区视为有音频输入（0.05% 满幅） */
+  AUDIO_LEVEL_THRESHOLD: 0.0005,
 } as const;
 
 /** Hook 返回值 */
@@ -47,6 +53,10 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
   const streamRef = useRef<MediaStream | null>(null);
   const contextRef = useRef<AudioContext | null>(null);
   const callbacksRef = useRef<Set<(pcm: Int16Array) => void>>(new Set());
+  /** 静音检测定时器引用——processStream 创建，stop 负责清理 */
+  const silenceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** 最后收到有效音频的时间戳——0 表示从未收到 */
+  const lastAudioTsRef = useRef<number>(0);
 
   /** 注册 PCM 回调，返回取消注册函数 */
   const onChunk = useCallback(
@@ -59,6 +69,14 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
 
   /** 停止并释放所有音频资源 */
   const stop = useCallback((): void => {
+    /** 清除静音检测定时器 */
+    if (silenceTimerRef.current) {
+      clearInterval(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    /** 重置静音检测状态 */
+    lastAudioTsRef.current = 0;
+
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     contextRef.current?.close();
@@ -87,14 +105,13 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
   }, [stop]);
 
   /**
-   * 系统音频捕获：桌面源 ID → getUserMedia（Chrome 桌面约束）→ AudioContext → PCM
-   * 首次使用弹出屏幕选择对话框（Chrome 安全策略），后续静默
+   * 系统音频捕获：主进程 setDisplayMediaRequestHandler + getDisplayMedia → AudioContext → PCM
+   * 首次使用弹出系统屏幕选择器，后续可能复用权限
    */
   const captureSystem = useCallback(async (cfg: AudioCaptureConfig): Promise<void> => {
-    /** 通过 IPC 获取桌面捕获源 ID */
-    const sourceId = await window.electronAPI?.getDesktopSourceId();
-    if (!sourceId) {
-      throw new Error('无法获取桌面捕获源，请确认屏幕共享权限');
+    /** 浏览器环境检测 */
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      throw new Error('当前环境不支持系统音频捕获');
     }
 
     const sampleRate = cfg.sampleRate ?? DEFAULTS.SAMPLE_RATE;
@@ -102,22 +119,18 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
       throw new Error(`无效的采样率: ${sampleRate}`);
     }
 
-    /** Chrome 桌面捕获约束：捕获屏幕 + 系统音频 */
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        mandatory: {
-          chromeMediaSource: 'desktop' as unknown as string,
-          chromeMediaSourceId: sourceId,
-        },
-      } as MediaTrackConstraints,
-      video: {
-        mandatory: {
-          chromeMediaSource: 'desktop' as unknown as string,
-          chromeMediaSourceId: sourceId,
-        },
-      } as MediaTrackConstraints,
+    /**
+     * getDisplayMedia 必须同时请求 video 和 audio 才能获取系统音频权限
+     * 视频轨道在获取后立即停止以节省 GPU 资源——仅需音频数据
+     * video: 4×4×1fps 最小规格，避免 GPU 纹理包装错误
+     */
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      audio: true,
+      video: { width: 4, height: 4, frameRate: 1 },
     });
 
+    /** 视频轨道的释放移至 processStream 内 AudioContext 初始化之后
+     *  过早停止视频轨道可能导致整个捕获会话被 Windows 撤销 */
     await processStream(stream, sampleRate);
   }, [stop]);
 
@@ -146,15 +159,51 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
     const sourceNode = audioCtx.createMediaStreamSource(stream);
     const processor = audioCtx.createScriptProcessor(DEFAULTS.BUFFER_SIZE, 1, 1);
 
-    /** 每个缓冲区：Float32Array → Int16Array（16-bit PCM），分发给所有监听者 */
+    /** 每个缓冲区：静音检测 → Float32Array → Int16Array PCM，分发给所有监听者 */
     processor.onaudioprocess = (event: AudioProcessingEvent): void => {
       const floatSamples = event.inputBuffer.getChannelData(0);
+
+      /** 静音检测：计算缓冲区内最大采样振幅，超过阈值标记为有效音频 */
+      let maxSample = 0;
+      for (let i = 0; i < floatSamples.length; i++) {
+        const abs = Math.abs(floatSamples[i]);
+        if (abs > maxSample) maxSample = abs;
+      }
+      if (maxSample > DEFAULTS.AUDIO_LEVEL_THRESHOLD) {
+        lastAudioTsRef.current = Date.now();
+      }
+
       const pcm16 = float32ToInt16(floatSamples);
       callbacksRef.current.forEach((cb) => cb(pcm16));
     };
 
     sourceNode.connect(processor);
     processor.connect(audioCtx.destination);
+
+    /** 延迟释放视频轨道——音频处理管线已完全初始化（AudioContext + ScriptProcessor 就绪）
+     *  此时停止视频轨道不再影响音频数据的正常捕获 */
+    stream.getVideoTracks().forEach((track) => track.stop());
+
+    /** 启动静音检测定时器：定期检查是否有有效音频输入 */
+    const streamStartTime = Date.now();
+    lastAudioTsRef.current = 0;
+
+    silenceTimerRef.current = setInterval(() => {
+      const now = Date.now();
+      const last = lastAudioTsRef.current;
+
+      if (last === 0) {
+        /** 从未收到有效音频——超过阈值判定为无音频输入 */
+        if (now - streamStartTime >= DEFAULTS.SILENT_TIMEOUT_MS) {
+          setError('未检测到音频输入，请检查音频源是否正常工作');
+          stop();
+        }
+      } else if (now - last >= DEFAULTS.SILENT_TIMEOUT_MS) {
+        /** 曾经收到过音频但长时间静默——可能音频源已断开 */
+        setError('音频输入已静默超过 5 秒，请检查音频源');
+        stop();
+      }
+    }, DEFAULTS.SILENT_CHECK_INTERVAL);
   }, [stop]);
 
   /** 开始捕获，防重入：先置状态再异步，消除 await 期间的竞态窗口 */
@@ -171,7 +220,11 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
       }
     } catch (err) {
       setIsCapturing(false);
-      setError(err instanceof Error ? err.message : '音频设备启动失败');
+      /** 保存错误后重新抛出——让调用方（useTranslationSession）感知启动失败
+       *  从而跳过 setIsTranslating(true) 和 showOverlay() */
+      const message = err instanceof Error ? err.message : '音频设备启动失败';
+      setError(message);
+      throw new Error(message);
     }
   }, [isCapturing, captureMicrophone, captureSystem]);
 
