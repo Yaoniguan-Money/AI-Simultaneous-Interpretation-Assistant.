@@ -2,6 +2,8 @@
 export interface SubtitleEntry {
   /** 唯一标识 */
   id: number;
+  /** 时间戳（毫秒） */
+  timestamp: number;
   /** 英文原文 */
   original: string;
   /** 中文翻译 */

@@ -10,6 +10,7 @@ import {
 import { useTranslationSession } from '../../hooks/useTranslationSession';
 import { ASRSettings } from '../settings/ASRSettings';
 import { LLMSettings } from '../settings/LLMSettings';
+import { HistoryPanel } from '../history/HistoryPanel';
 
 /** 当前显示的视图 */
 type ActiveView = 'main' | 'settings' | 'history' | 'demo';
@@ -62,7 +63,7 @@ export function MainWindow(): JSX.Element {
         {activeView === 'settings' ? (
           <SettingsView onBack={() => setActiveView('main')} />
         ) : activeView === 'history' ? (
-          <PlaceholderView title="Translation History" onBack={() => setActiveView('main')} />
+          <HistoryPanel onBack={() => setActiveView('main')} />
         ) : activeView === 'demo' ? (
           <PlaceholderView title="Demo Mode" onBack={() => setActiveView('main')} />
         ) : (
