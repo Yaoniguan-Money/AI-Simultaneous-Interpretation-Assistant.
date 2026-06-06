@@ -12,10 +12,10 @@ declare global {
     saveCredentials: (data: string) => Promise<boolean>;
     /** 从本地加载解密凭证 */
     loadCredentials: () => Promise<string | null>;
-    /** 推送字幕数据到 OverlayWindow */
-    sendSubtitleUpdate: (data: unknown) => Promise<void>;
+    /** 推送字幕数据到 OverlayWindow —— payload 包含字幕条目和双语开关 */
+    sendSubtitleUpdate: (data: import('../src/types/subtitle').SubtitlePayload) => Promise<void>;
     /** 注册字幕数据更新监听，返回取消监听函数 */
-    onSubtitleUpdate: (callback: (data: unknown) => void) => (() => void);
+    onSubtitleUpdate: (callback: (data: import('../src/types/subtitle').SubtitlePayload) => void) => (() => void);
   }
 
   interface Window {

@@ -76,6 +76,8 @@ export interface TranslationResult {
   translation: string;
   corrections: Correction[];
   tokens: Token[];
+  /** 被翻译的原文句子——管道填充，供字幕层展示英文原文（可选，修正/中间 token 无此字段） */
+  originalText?: string;
 }
 
 /** 领域检测结果 */
