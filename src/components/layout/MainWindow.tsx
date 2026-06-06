@@ -12,6 +12,7 @@ import { useCredentialPersistence } from '../../hooks/useCredentialPersistence';
 import { ASRSettings } from '../settings/ASRSettings';
 import { LLMSettings } from '../settings/LLMSettings';
 import { HistoryPanel } from '../history/HistoryPanel';
+import { DemoPlayer } from '../demo/DemoPlayer';
 
 /** 当前显示的视图 */
 type ActiveView = 'main' | 'settings' | 'history' | 'demo';
@@ -69,7 +70,7 @@ export function MainWindow(): JSX.Element {
         ) : activeView === 'history' ? (
           <HistoryPanel onBack={() => setActiveView('main')} />
         ) : activeView === 'demo' ? (
-          <PlaceholderView title="Demo Mode" onBack={() => setActiveView('main')} />
+          <DemoPlayer onBack={() => setActiveView('main')} />
         ) : (
           <MainView
             isTranslating={isTranslating}
@@ -240,22 +241,6 @@ function SettingsView({ onBack }: { onBack: () => void }): JSX.Element {
           All keys encrypted locally &middot; Never uploaded
         </p>
       </div>
-    </div>
-  );
-}
-
-/** 占位视图（翻译历史/演示模式，后续 PR 实现） */
-function PlaceholderView({ title, onBack }: { title: string; onBack: () => void }): JSX.Element {
-  return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-3">
-      <p className="text-text-muted text-sm">{title}</p>
-      <p className="text-text-faded text-xs">Coming soon</p>
-      <button
-        onClick={onBack}
-        className="text-xs text-text-muted hover:text-text-primary transition-colors mt-4"
-      >
-        Back
-      </button>
     </div>
   );
 }
