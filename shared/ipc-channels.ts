@@ -11,4 +11,6 @@ export const IPC_CHANNELS = {
   CREDENTIALS_SAVE: 'credentials:save',
   /** 从本地加载解密凭证 */
   CREDENTIALS_LOAD: 'credentials:load',
+  /** 字幕数据推送：MainWindow → 主进程 → OverlayWindow */
+  SUBTITLE_UPDATE: 'subtitle:update',
 } as const;

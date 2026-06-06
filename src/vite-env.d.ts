@@ -14,6 +14,10 @@ declare global {
     saveCredentials: (data: string) => Promise<boolean>;
     /** 从本地加载解密凭证 */
     loadCredentials: () => Promise<string | null>;
+    /** 推送字幕数据到 OverlayWindow */
+    sendSubtitleUpdate: (data: unknown) => Promise<void>;
+    /** 注册字幕数据更新监听，返回取消监听函数 */
+    onSubtitleUpdate: (callback: (data: unknown) => void) => (() => void);
   }
 
   interface Window {
