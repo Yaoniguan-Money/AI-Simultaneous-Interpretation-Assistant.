@@ -10,6 +10,7 @@ import { APP_NAME } from '../shared/app-config';
 import {
   closeOverlayWindow,
   createOverlayWindow,
+  getOverlayWindow,
   hideOverlayWindow,
 } from './overlay-window';
 
@@ -103,5 +104,13 @@ ipcMain.handle(IPC_CHANNELS.CREDENTIALS_LOAD, async () => {
     return safeStorage.decryptString(encrypted);
   } catch {
     return null;
+  }
+});
+
+/** 字幕数据转发：MainWindow 渲染进程 → 主进程 → OverlayWindow 渲染进程 */
+ipcMain.handle(IPC_CHANNELS.SUBTITLE_UPDATE, (_event, data: unknown) => {
+  const overlay = getOverlayWindow();
+  if (overlay) {
+    overlay.webContents.send(IPC_CHANNELS.SUBTITLE_UPDATE, data);
   }
 });

@@ -78,3 +78,11 @@ export function closeOverlayWindow(): void {
     overlayWindow = null;
   }
 }
+
+/** 获取字幕悬浮窗引用（供主进程 IPC 转发字幕数据使用） */
+export function getOverlayWindow(): BrowserWindow | null {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    return overlayWindow;
+  }
+  return null;
+}
