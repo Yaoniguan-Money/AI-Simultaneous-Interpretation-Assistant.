@@ -74,7 +74,6 @@ export function ASRSettings(): JSX.Element {
         <>
           <ApiKeyInput label="App ID" value={current.credentials['appId'] ?? ''} onChange={(v) => updateCred('appId', v)} />
           <ApiKeyInput label="API Key" value={current.credentials['apiKey'] ?? ''} onChange={(v) => updateCred('apiKey', v)} />
-          <ApiKeyInput label="API Secret" value={current.credentials['apiSecret'] ?? ''} onChange={(v) => updateCred('apiSecret', v)} />
         </>
       )}
       {current.provider === 'aliyun' && (

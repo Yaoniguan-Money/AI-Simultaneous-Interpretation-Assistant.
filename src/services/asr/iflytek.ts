@@ -2,85 +2,70 @@ import type { ASRConfig, ASRProvider, ASRResult } from './types';
 import { ensureConfigured } from '../provider-utils';
 
 /**
- * 讯飞语音听写（流式版）WebSocket API 协议常量
- * 参考文档：https://www.xfyun.cn/doc/asr/voicedictation/API.html
- * 鉴权方式：HMAC-SHA256 签名 → Base64 → URL query 参数
+ * 讯飞实时语音转写（RTASR）WebSocket API 协议常量
+ * 参考文档：https://www.xfyun.cn/doc/asr/rtasr/API.html
+ * 鉴权方式：signa = Base64(HmacSHA1(MD5(appid + ts), apiKey))
  */
 const PROTOCOL = {
   /** WebSocket 端点 */
-  WSS_URL: 'wss://iat-api.xfyun.cn/v2/iat',
-  /** 鉴权 host 字段 */
-  HOST: 'iat-api.xfyun.cn',
-  /** 鉴权 path 字段 */
-  PATH: '/v2/iat',
-  /** 业务 domain */
-  DOMAIN: 'iat',
-  /** 音频格式：16kHz / 16bit / 单声道 PCM */
-  AUDIO_FORMAT: 'audio/L16;rate=16000',
-  /** 音频编码方式 */
-  AUDIO_ENCODING: 'raw',
-  /** 首帧标识 */
-  FRAME_FIRST: 0,
-  /** 中间帧标识 */
-  FRAME_CONTINUE: 1,
-  /** 尾帧标识（发送后服务端开始关闭流） */
-  FRAME_LAST: 2,
+  WSS_URL: 'wss://rtasr.xfyun.cn/v1/ws',
+  /** 默认识别语言（URL 的 lang 参数） */
+  DEFAULT_LANG: 'en',
   /** 连接建立超时（毫秒） */
   CONNECT_TIMEOUT: 10000,
-  /** 服务端响应等待超时（毫秒） */
-  RESPONSE_TIMEOUT: 1000,
+  /** 识别结果等待超时（毫秒），适应 RTASR 推送间隔 */
+  RESPONSE_TIMEOUT: 5000,
 } as const;
 
 /** 凭证字段名，与 ASRConfig.credentials 中的 key 对应 */
 const CRED_KEY = {
   appId: 'appId',
   apiKey: 'apiKey',
-  apiSecret: 'apiSecret',
 } as const;
 
-/**
- * cfg.language（内部简写 'en'/'zh'）→ 讯飞 API language 参数映射
- * 'en' → 'en_us'（英文），'zh' → 'zh_cn'（中文）
- */
-const LANG_TO_API: Record<string, string> = {
-  en: 'en_us',
-  zh: 'zh_cn',
-};
+/** RTASR WebSocket 服务端消息外层结构 */
+interface RTASRWsMessage {
+  action: string;
+  code: string;
+  data: string;
+  desc: string;
+  sid: string;
+}
 
-/** 讯飞 WebSocket 返回的 JSON 结构 */
-interface IFlyTekWsMessage {
-  code: number;
-  message?: string;
-  sid?: string;
-  data?: {
-    status?: number;
-    result?: {
-      sn?: number;
-      ls?: boolean;
-      ws?: Array<{
-        bg?: number;
-        ed?: number;
-        cw?: Array<{ w?: string; sc?: number }>;
+/** RTASR data 字段解析后的识别结果嵌套结构 */
+interface RTASRResultData {
+  cn?: {
+    st?: {
+      bg?: string;
+      ed?: string;
+      rt?: Array<{
+        ws?: Array<{
+          cw?: Array<{ w?: string; wp?: string }>;
+          wb?: number;
+          we?: number;
+        }>;
       }>;
+      type?: string;
     };
   };
+  seg_id?: number;
 }
 
 /**
- * 讯飞语音听写（流式版）WebSocket API 实现
+ * 讯飞实时语音转写（RTASR）WebSocket API 实现
  *
- * 使用讯飞流式 WebSocket 接口，支持实时语音识别。
- * - 连接是懒初始化的：首次 recognize() 调用时建立 WebSocket
- * - recognize() 保持 Promise<ASRResult> 返回签名，与 ASRProvider 接口兼容
- * - dispose() 发送尾帧后关闭连接
- * - 无 Node.js 依赖，纯浏览器 API（WebSocket + Web Crypto），可在渲染进程运行
+ * 使用讯飞 RTASR WebSocket 协议，支持不限时长实时语音识别。
+ * - 连接懒初始化：首次 recognize() 调用时建立 WebSocket 并完成握手
+ * - recognize() 保持 Promise<ASRResult> 签名，与 ASRProvider 接口兼容
+ * - 鉴权使用 MD5 + HMAC-SHA1 签名（crypto.subtle），纯浏览器 API
+ * - 音频以二进制 PCM 直接发送，不再经 Base64 / JSON 包裹
+ * - dispose() 发送 {"end": true} 结束信号后关闭连接
  */
 export class IFlyTekASR implements ASRProvider {
   readonly name = 'iflytek';
 
   private ws: WebSocket | null = null;
   private config: ASRConfig | null = null;
-  private isFirstFrame = true;
 
   /** onmessage 写入的下一个待消费结果 */
   private queuedResult: ASRResult | null = null;
@@ -96,6 +81,11 @@ export class IFlyTekASR implements ASRProvider {
     this.config = { ...config };
   }
 
+  /**
+   * 发送一段 PCM 音频数据进行识别
+   * 音频格式要求：16kHz / 16bit / 单声道 / PCM 原始数据
+   * 返回识别结果——若当前无可用结果则等待，超时返回空结果
+   */
   async recognize(audio: Uint8Array): Promise<ASRResult> {
     const cfg = ensureConfigured(this.config, '讯飞 ASR');
     if (!audio || audio.length === 0) {
@@ -103,15 +93,12 @@ export class IFlyTekASR implements ASRProvider {
     }
 
     try {
-      /** 懒连接：首次调用时建立 WebSocket */
+      /** 懒连接：首次调用时建立 WebSocket 并完成 RTASR 握手 */
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         await this.connect(cfg);
       }
-
-      /** 确定帧状态：首帧带 common+business，后续帧只带 data */
-      const status = this.isFirstFrame ? PROTOCOL.FRAME_FIRST : PROTOCOL.FRAME_CONTINUE;
-      this.sendFrame(audio, status);
-      this.isFirstFrame = false;
+      /** 直接发送二进制 PCM 音频，不做 JSON 包裹或 Base64 编码 */
+      this.ws!.send(audio.buffer);
     } catch {
       return this.emptyResult(true);
     }
@@ -123,7 +110,7 @@ export class IFlyTekASR implements ASRProvider {
       return r;
     }
 
-    /** 等待服务端下一条消息，超时后返回空结果 */
+    /** 等待服务端推送下一条结果，超时后返回空结果 */
     return new Promise<ASRResult>((resolve) => {
       this.pendingResolve = resolve;
       this.pendingTimer = setTimeout(() => {
@@ -136,23 +123,16 @@ export class IFlyTekASR implements ASRProvider {
   }
 
   dispose(): void {
-    /** 发送尾帧通知服务端音频流结束 */
+    /** 发送 {"end": true} 二进制消息，通知服务端音频流结束 */
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
-        this.ws.send(JSON.stringify({
-          data: {
-            status: PROTOCOL.FRAME_LAST,
-            format: PROTOCOL.AUDIO_FORMAT,
-            audio: '',
-            encoding: PROTOCOL.AUDIO_ENCODING,
-          },
-        }));
+        const encoder = new TextEncoder();
+        this.ws.send(encoder.encode(JSON.stringify({ end: true })));
       } catch { /* 连接可能已断开 */ }
       this.ws.close(1000);
     }
     this.ws = null;
     this.config = null;
-    this.isFirstFrame = true;
     this.queuedResult = null;
 
     /** 清理等待中的 Promise */
@@ -165,78 +145,13 @@ export class IFlyTekASR implements ASRProvider {
 
   /**
    * 验证凭证有效性
-   * 建立 WebSocket → 发首帧静音 PCM → 发尾帧 → 等待服务端响应
-   * 判定依据：code === 0 且 data.status === 2（服务端确认完整流程成功）
-   * 空音频返回 w="" 是正常的，不以识别文本是否为空判断
+   * 建立 WebSocket → 等待 "started" 握手确认 → 关闭连接
+   * 失败时通过 console.error 输出服务端返回的具体错误码和描述
    */
   async validateCredentials(config: ASRConfig): Promise<boolean> {
     try {
       await this.configure(config);
-
-      const url = await buildAuthUrl(config);
-      const ws = new WebSocket(url);
-      /** settled 标记防止 onmessage/onclose/onerror/timeout 竞态 */
-      let settled = false;
-      let connectTimer: ReturnType<typeof setTimeout> | null = null;
-
-      /** 连接阶段：等待 onopen，清理定时器防泄漏 */
-      await new Promise<void>((resolve, reject) => {
-        ws.onopen = () => {
-          if (connectTimer) clearTimeout(connectTimer);
-          resolve();
-        };
-        ws.onerror = () => {
-          if (connectTimer) clearTimeout(connectTimer);
-          if (!settled) { settled = true; reject(new Error('WebSocket 连接失败')); }
-        };
-        connectTimer = setTimeout(() => {
-          if (!settled) { settled = true; reject(new Error('连接超时')); }
-        }, PROTOCOL.CONNECT_TIMEOUT);
-      });
-
-      /** 发送首帧（空音频，仅验证鉴权）+ 尾帧 */
-      ws.send(JSON.stringify(buildFirstFrame(config, new Uint8Array(0))));
-      ws.send(JSON.stringify({
-        data: { status: PROTOCOL.FRAME_LAST, format: PROTOCOL.AUDIO_FORMAT, audio: '', encoding: PROTOCOL.AUDIO_ENCODING },
-      }));
-
-      /** 等待服务端确认：code===0 且 data.status===2 表示鉴权通过且流程完成 */
-      const ok = await new Promise<boolean>((resolve) => {
-        let resultTimer: ReturnType<typeof setTimeout> | null = null;
-
-        ws.onmessage = (event: MessageEvent) => {
-          if (settled) return;
-          try {
-            const json = JSON.parse(event.data as string) as IFlyTekWsMessage;
-            if (json.code === 0 && json.data?.status === 2) {
-              settled = true;
-              if (resultTimer) clearTimeout(resultTimer);
-              resolve(true);
-            }
-          } catch { /* 解析失败，继续等待下一条消息 */ }
-        };
-
-        /** onclose code=1000 是正常关闭——但在收到成功结果前关闭说明服务端异常 */
-        ws.onclose = () => {
-          if (settled) return;
-          settled = true;
-          if (resultTimer) clearTimeout(resultTimer);
-          resolve(false);
-        };
-
-        ws.onerror = () => {
-          if (settled) return;
-          settled = true;
-          if (resultTimer) clearTimeout(resultTimer);
-          resolve(false);
-        };
-
-        resultTimer = setTimeout(() => {
-          if (!settled) { settled = true; resolve(false); }
-        }, PROTOCOL.RESPONSE_TIMEOUT);
-      });
-
-      ws.close(1000);
+      const ok = await testAuthHandshake(config);
       this.config = null;
       return ok;
     } catch {
@@ -246,14 +161,17 @@ export class IFlyTekASR implements ASRProvider {
 
   // ---- 私有方法 ----
 
-  /** 建立 WebSocket 连接并注册 onmessage 处理器 */
+  /**
+   * 建立 WebSocket 连接并完成 RTASR 握手
+   * 分两阶段：①等待 WebSocket open + ②等待服务端 started 确认
+   */
   private async connect(cfg: ASRConfig): Promise<void> {
     const url = await buildAuthUrl(cfg);
     this.ws = new WebSocket(url);
-    this.isFirstFrame = true;
     this.queuedResult = null;
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
+    /** 阶段 ①：等待 WebSocket 连接建立 */
     await new Promise<void>((resolve, reject) => {
       this.ws!.onopen = () => {
         if (connectTimer) clearTimeout(connectTimer);
@@ -263,32 +181,51 @@ export class IFlyTekASR implements ASRProvider {
         if (connectTimer) clearTimeout(connectTimer);
         reject(new Error('WebSocket 连接失败'));
       };
-      connectTimer = setTimeout(() => reject(new Error('WebSocket 连接超时')), PROTOCOL.CONNECT_TIMEOUT);
+      connectTimer = setTimeout(
+        () => reject(new Error('WebSocket 连接超时')),
+        PROTOCOL.CONNECT_TIMEOUT,
+      );
     });
 
-    /** 注册消息处理器：解析服务端 JSON → 提取识别文本 → 通知等待的 recognize() */
-    this.ws.onmessage = (event: MessageEvent) => {
-      const result = parseResult(event.data as string);
-      if (!result) return;
+    /** 阶段 ②：等待 RTASR 握手确认 */
+    await this.awaitHandshake();
 
-      if (this.pendingResolve) {
-        /** 有 recognize() 正在等待 → 立即 resolve */
-        const resolve = this.pendingResolve;
-        this.pendingResolve = null;
-        if (this.pendingTimer) clearTimeout(this.pendingTimer);
-        resolve(result);
-        /** 最终结果后重置状态 */
-        if (result.isFinal) {
-          this.queuedResult = null;
+    /** 阶段 ③：注册结果处理器 */
+    this.ws.onmessage = (event: MessageEvent) => {
+      try {
+        const msg = JSON.parse(event.data as string) as RTASRWsMessage;
+
+        /** 服务端推送错误 */
+        if (msg.action === 'error') {
+          console.error(`[RTASR] 服务端错误: ${msg.desc} (code: ${msg.code})`);
+          if (this.pendingResolve) {
+            this.pendingResolve(this.emptyResult(true));
+            this.pendingResolve = null;
+            if (this.pendingTimer) clearTimeout(this.pendingTimer);
+          }
+          return;
         }
-      } else {
-        /** 没有等待者 → 缓存结果供下一次 recognize() 消费 */
-        this.queuedResult = result;
-      }
+
+        /** 识别结果——data 为 JSON 字符串需二次解析 */
+        if (msg.action === 'result' && msg.data) {
+          const result = extractRTASRResult(msg.data);
+          if (!result) return;
+
+          if (this.pendingResolve) {
+            const resolve = this.pendingResolve;
+            this.pendingResolve = null;
+            if (this.pendingTimer) clearTimeout(this.pendingTimer);
+            resolve(result);
+            if (result.isFinal) this.queuedResult = null;
+          } else {
+            this.queuedResult = result;
+          }
+        }
+      } catch { /* JSON 解析失败，忽略本条消息 */ }
     };
 
+    /** 服务端主动关闭时清理等待中的识别 */
     this.ws.onclose = () => {
-      /** 服务端主动关闭时清理等待 */
       if (this.pendingResolve) {
         this.pendingResolve(this.emptyResult(true));
         this.pendingResolve = null;
@@ -297,21 +234,50 @@ export class IFlyTekASR implements ASRProvider {
     };
   }
 
-  /** 发送一帧音频数据 over WebSocket */
-  private sendFrame(audio: Uint8Array, status: number): void {
-    const cfg = this.config!;
-    const frame = status === PROTOCOL.FRAME_FIRST
-      ? buildFirstFrame(cfg, audio)
-      : buildContinueFrame(audio);
-    this.ws!.send(JSON.stringify(frame));
+  /**
+   * 等待 RTASR 握手确认
+   * 服务端返回 {"action":"started","code":"0"} 表示鉴权通过
+   * 返回 {"action":"error"} 表示鉴权失败
+   */
+  private awaitHandshake(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      this.ws!.onmessage = (event: MessageEvent) => {
+        if (settled) return;
+        try {
+          const msg = JSON.parse(event.data as string) as RTASRWsMessage;
+          if (msg.action === 'started' && msg.code === '0') {
+            settled = true;
+            if (timer) clearTimeout(timer);
+            resolve();
+          } else if (msg.action === 'error') {
+            settled = true;
+            if (timer) clearTimeout(timer);
+            reject(new Error(`RTASR 握手失败: ${msg.desc} (code: ${msg.code})`));
+          }
+        } catch { /* 非 JSON 消息，忽略 */ }
+      };
+
+      this.ws!.onerror = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        reject(new Error('RTASR 握手阶段 WebSocket 错误'));
+      };
+
+      timer = setTimeout(() => {
+        if (!settled) { settled = true; reject(new Error('RTASR 握手超时')); }
+      }, PROTOCOL.CONNECT_TIMEOUT);
+    });
   }
 
-  /** 校验配置完整性：appId/apiKey/apiSecret 三者缺一不可 */
+  /** 校验配置完整性：仅需 appId + apiKey */
   private validateConfig(config: ASRConfig): void {
     const missing: string[] = [];
     if (!config.credentials[CRED_KEY.appId]) missing.push(CRED_KEY.appId);
     if (!config.credentials[CRED_KEY.apiKey]) missing.push(CRED_KEY.apiKey);
-    if (!config.credentials[CRED_KEY.apiSecret]) missing.push(CRED_KEY.apiSecret);
     if (missing.length > 0) {
       throw new Error(`讯飞 ASR 缺少凭证: ${missing.join(', ')}`);
     }
@@ -323,104 +289,100 @@ export class IFlyTekASR implements ASRProvider {
   }
 }
 
-// ---- 帧构建函数（无状态，不依赖实例） ----
-
-/** 构建首帧 JSON：包含 common.app_id + business + data */
-function buildFirstFrame(cfg: ASRConfig, audio: Uint8Array): Record<string, unknown> {
-  const langCode = cfg.language ?? 'en';
-  return {
-    common: { app_id: cfg.credentials[CRED_KEY.appId] },
-    business: {
-      domain: PROTOCOL.DOMAIN,
-      language: LANG_TO_API[langCode] ?? LANG_TO_API.en,
-      accent: 'mandarin',
-      vad_eos: 10000,
-    },
-    data: {
-      status: PROTOCOL.FRAME_FIRST,
-      format: PROTOCOL.AUDIO_FORMAT,
-      audio: audio.length > 0 ? uint8ToBase64(audio) : '',
-      encoding: PROTOCOL.AUDIO_ENCODING,
-    },
-  };
-}
-
-/** 构建中间帧 JSON：仅含 data */
-function buildContinueFrame(audio: Uint8Array): Record<string, unknown> {
-  return {
-    data: {
-      status: PROTOCOL.FRAME_CONTINUE,
-      format: PROTOCOL.AUDIO_FORMAT,
-      audio: uint8ToBase64(audio),
-      encoding: PROTOCOL.AUDIO_ENCODING,
-    },
-  };
-}
-
-// ---- 结果解析 ----
-
-/**
- * 解析 WebSocket 返回的 JSON 识别结果
- * 从 ws[].cw[].w 逐词拼接文本，ls 字段决定是否为最终结果
- * 返回 null 表示非识别结果消息（如心跳或首帧确认）
- */
-function parseResult(rawData: string): ASRResult | null {
-  try {
-    const json = JSON.parse(rawData) as IFlyTekWsMessage;
-    if (json.code !== 0) return null;
-
-    const result = json.data?.result;
-    if (!result?.ws) return null;
-
-    const words: string[] = [];
-    for (const w of result.ws) {
-      if (w.cw && w.cw.length > 0 && w.cw[0].w) {
-        words.push(w.cw[0].w);
-      }
-    }
-
-    return {
-      text: words.join(''),
-      isFinal: result.ls ?? false,
-      confidence: 1.0,
-      startTime: 0,
-      endTime: 0,
-    };
-  } catch {
-    return null;
-  }
-}
-
 // ---- 鉴权工具函数 ----
 
 /**
- * 构建讯飞 WebSocket 鉴权 URL
- * 鉴权流程：signature_origin → HMAC-SHA256(apiSecret) → Base64 →
- *   authorization_origin → Base64 → 拼接到 URL query
+ * 构建 RTASR WebSocket 鉴权 URL
+ * 鉴权流程：appid + ts → MD5 → HMAC-SHA1(apiKey) → Base64 → URL query
+ * signa = Base64(HmacSHA1(MD5(appid + ts), apiKey))
  */
 async function buildAuthUrl(cfg: ASRConfig): Promise<string> {
+  const appId = cfg.credentials[CRED_KEY.appId];
   const apiKey = cfg.credentials[CRED_KEY.apiKey];
-  const apiSecret = cfg.credentials[CRED_KEY.apiSecret];
-  /** RFC1123 GMT 格式日期：Wed, 21 Jun 2023 12:00:00 GMT */
-  const date = new Date().toUTCString();
+  const ts = Math.floor(Date.now() / 1000).toString();
+  const lang = cfg.language ?? PROTOCOL.DEFAULT_LANG;
 
-  /** signature_origin：host + date + request-line，换行分隔 */
-  const signatureOrigin = `host: ${PROTOCOL.HOST}\ndate: ${date}\nGET ${PROTOCOL.PATH} HTTP/1.1`;
-  const signature = await hmacSha256Base64(signatureOrigin, apiSecret);
+  const md5Str = md5Hex(appId + ts);
+  const signa = await hmacSha1Base64(md5Str, apiKey);
 
-  /** authorization_origin 格式固定，headers 值为字面量 "host date request-line" */
-  const authOrigin = `api_key="${apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
-  /** authorization 为 authOrigin 的 Base64 编码 */
-  const authorization = btoa(authOrigin);
-
-  return `${PROTOCOL.WSS_URL}?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${PROTOCOL.HOST}`;
+  return `${PROTOCOL.WSS_URL}?appid=${encodeURIComponent(appId)}&ts=${ts}&signa=${encodeURIComponent(signa)}&lang=${encodeURIComponent(lang)}`;
 }
 
 /**
- * 使用 Web Crypto API 计算 HMAC-SHA256 并返回 Base64 结果
+ * 创建测试 WebSocket 并等待 RTASR 握手确认
+ * 供 validateCredentials 专用，与 connect() 的握手逻辑独立
+ * 握手成功→true，握手失败/超时→false
+ */
+async function testAuthHandshake(cfg: ASRConfig): Promise<boolean> {
+  const url = await buildAuthUrl(cfg);
+  const ws = new WebSocket(url);
+  let settled = false;
+  let connectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 等待 onopen */
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => {
+      if (connectTimer) clearTimeout(connectTimer);
+      resolve();
+    };
+    ws.onerror = () => {
+      if (connectTimer) clearTimeout(connectTimer);
+      if (!settled) { settled = true; reject(new Error('WebSocket 连接失败')); }
+    };
+    connectTimer = setTimeout(() => {
+      if (!settled) { settled = true; reject(new Error('连接超时')); }
+    }, PROTOCOL.CONNECT_TIMEOUT);
+  });
+
+  /** 等待握手：action="started"=成功，action="error"=失败 */
+  const ok = await new Promise<boolean>((resolve) => {
+    let resultTimer: ReturnType<typeof setTimeout> | null = null;
+
+    ws.onmessage = (event: MessageEvent) => {
+      if (settled) return;
+      try {
+        const msg = JSON.parse(event.data as string) as RTASRWsMessage;
+        if (msg.action === 'started' && msg.code === '0') {
+          settled = true;
+          if (resultTimer) clearTimeout(resultTimer);
+          resolve(true);
+        } else if (msg.action === 'error') {
+          settled = true;
+          if (resultTimer) clearTimeout(resultTimer);
+          console.error(`[RTASR] 鉴权失败: ${msg.desc} (code: ${msg.code})`);
+          resolve(false);
+        }
+      } catch { /* JSON 解析失败，继续等待 */ }
+    };
+
+    ws.onclose = () => {
+      if (settled) return;
+      settled = true;
+      if (resultTimer) clearTimeout(resultTimer);
+      resolve(false);
+    };
+
+    ws.onerror = () => {
+      if (settled) return;
+      settled = true;
+      if (resultTimer) clearTimeout(resultTimer);
+      resolve(false);
+    };
+
+    resultTimer = setTimeout(() => {
+      if (!settled) { settled = true; resolve(false); }
+    }, PROTOCOL.CONNECT_TIMEOUT);
+  });
+
+  ws.close(1000);
+  return ok;
+}
+
+/**
+ * 使用 Web Crypto API 计算 HMAC-SHA1 并返回 Base64 结果
  * 零外部依赖，浏览器原生 API，渲染进程可用
  */
-async function hmacSha256Base64(message: string, secret: string): Promise<string> {
+async function hmacSha1Base64(message: string, secret: string): Promise<string> {
   const enc = new TextEncoder();
   const keyData = enc.encode(secret);
   const messageData = enc.encode(message);
@@ -428,12 +390,222 @@ async function hmacSha256Base64(message: string, secret: string): Promise<string
   const key = await crypto.subtle.importKey(
     'raw',
     keyData,
-    { name: 'HMAC', hash: 'SHA-256' },
+    { name: 'HMAC', hash: 'SHA-1' },
     false,
     ['sign'],
   );
   const sig = await crypto.subtle.sign('HMAC', key, messageData);
   return uint8ToBase64(new Uint8Array(sig));
+}
+
+// ---- 识别结果解析 ----
+
+/**
+ * 解析 RTASR 服务端返回的识别结果
+ * msg.data 是 JSON 字符串，需二次解析
+ * 文本提取路径：cn.st.rt[0].ws[].cw[].w 逐词拼接
+ * type="0"=最终结果，"1"=中间结果
+ * 返回 null 表示非识别结果消息（如心跳）
+ */
+function extractRTASRResult(rawData: string): ASRResult | null {
+  try {
+    const data = JSON.parse(rawData) as RTASRResultData;
+    const st = data.cn?.st;
+    if (!st?.rt?.[0]?.ws) return null;
+
+    const words: string[] = [];
+    for (const w of st.rt[0].ws) {
+      if (w.cw?.[0]?.w) {
+        words.push(w.cw[0].w);
+      }
+    }
+
+    const text = words.join('');
+    const isFinal = st.type === '0';
+
+    return {
+      text,
+      isFinal,
+      confidence: 1.0,
+      startTime: st.bg ? Number(st.bg) : 0,
+      endTime: st.ed ? Number(st.ed) : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---- 纯 JavaScript MD5 实现 ----
+
+/**
+ * RFC 1321 MD5 哈希算法，纯 JS 实现
+ * 输入 UTF-8 字符串，输出小写 32 位 hex 字符串
+ * crypto.subtle 不原生支持 MD5，故自实现，零依赖
+ */
+function md5Hex(input: string): string {
+  /** 将 UTF-8 字符串转为字节数组 */
+  const bytes = utf8Encode(input);
+  const len = bytes.length;
+
+  /** 填充：追加 0x80 + 补零 + 8 字节小端序原始长度（位） */
+  const padded = new Uint8Array(((len + 8) >>> 6) + 1 << 6);
+  padded.set(bytes);
+  padded[len] = 0x80;
+
+  /** 在最后 8 字节写入原始消息位长度（小端序，使用 32 位高低位） */
+  const view = new DataView(padded.buffer);
+  view.setUint32(padded.length - 8, (len * 8) >>> 0, true);
+  view.setUint32(padded.length - 4, Math.floor(len / 0x20000000), true);
+
+  /** MD5 初始向量 */
+  let a = 0x67452301;
+  let b = 0xefcdab89;
+  let c = 0x98badcfe;
+  let d = 0x10325476;
+
+  /** 每 64 字节（16 个 32 位字）为一组处理 */
+  for (let i = 0; i < padded.length; i += 64) {
+    const X = new Array(16);
+    const chunkView = new DataView(padded.buffer, i, 64);
+    for (let j = 0; j < 16; j++) {
+      X[j] = chunkView.getUint32(j * 4, true);
+    }
+
+    /** 四轮变换（每轮 16 步），每轮返回更新后的 [a,b,c,d] */
+    const [r1a, r1b, r1c, r1d] = round1(a, b, c, d, X);
+    const [r2a, r2b, r2c, r2d] = round2(r1a, r1b, r1c, r1d, X);
+    const [r3a, r3b, r3c, r3d] = round3(r2a, r2b, r2c, r2d, X);
+    const [r4a, r4b, r4c, r4d] = round4(r3a, r3b, r3c, r3d, X);
+
+    a = (a + r4a) >>> 0;
+    b = (b + r4b) >>> 0;
+    c = (c + r4c) >>> 0;
+    d = (d + r4d) >>> 0;
+  }
+
+  return toHex32(a) + toHex32(b) + toHex32(c) + toHex32(d);
+}
+
+// ---- MD5 辅助函数 ----
+
+/** MD5 辅助函数 F, G, H, I */
+function F(x: number, y: number, z: number): number { return (x & y) | (~x & z); }
+function G(x: number, y: number, z: number): number { return (x & z) | (y & ~z); }
+function H(x: number, y: number, z: number): number { return x ^ y ^ z; }
+function I(x: number, y: number, z: number): number { return y ^ (x | ~z); }
+
+/** 循环左移 */
+function rotl(x: number, n: number): number { return (x << n) | (x >>> (32 - n)); }
+
+/** 32 位无符号整数按 MD5 标准小端序输出（低位字节在前） */
+function toHex32(val: number): string {
+  return ((val & 0xff).toString(16).padStart(2, '0'))
+    + (((val >>> 8) & 0xff).toString(16).padStart(2, '0'))
+    + (((val >>> 16) & 0xff).toString(16).padStart(2, '0'))
+    + (((val >>> 24) & 0xff).toString(16).padStart(2, '0'));
+}
+
+/** UTF-8 编码：字符串 → 字节数组 */
+function utf8Encode(str: string): Uint8Array {
+  const result: number[] = [];
+  for (let i = 0; i < str.length; i++) {
+    const cp = str.charCodeAt(i);
+    if (cp < 0x80) {
+      result.push(cp);
+    } else if (cp < 0x800) {
+      result.push(0xc0 | (cp >>> 6), 0x80 | (cp & 0x3f));
+    } else if (cp < 0xd800 || cp >= 0xe000) {
+      result.push(0xe0 | (cp >>> 12), 0x80 | ((cp >>> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    } else {
+      /** 代理对：UTF-16 高/低位 → 码点 */
+      i++;
+      const lo = str.charCodeAt(i);
+      const full = 0x10000 + ((cp & 0x3ff) << 10) + (lo & 0x3ff);
+      result.push(
+        0xf0 | (full >>> 18),
+        0x80 | ((full >>> 12) & 0x3f),
+        0x80 | ((full >>> 6) & 0x3f),
+        0x80 | (full & 0x3f),
+      );
+    }
+  }
+  return new Uint8Array(result);
+}
+
+// ---- MD5 四轮变换 ----
+
+/** 正弦表 T[i] = floor(4294967296 * |sin(i+1)|)，i=0..63 */
+const T: number[] = [];
+for (let i = 0; i < 64; i++) {
+  T[i] = (Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0;
+}
+
+/** MD5 位移量：每轮 4 个值，各重复 4 次共 16 步 */
+const S1 = [7, 12, 17, 22];
+const S2 = [5, 9, 14, 20];
+const S3 = [4, 11, 16, 23];
+const S4 = [6, 10, 15, 21];
+
+/** MD5 单步操作：op(a, b, c, d, f, x, s, t) */
+type MD5State = [number, number, number, number];
+
+function md5Op(
+  func: (x: number, y: number, z: number) => number,
+  a: number, b: number, c: number, d: number,
+  x: number, t: number,
+): number {
+  return (a + func(b, c, d) + x + t) >>> 0;
+}
+
+function round1(aa: number, bb: number, cc: number, dd: number, X: number[]): MD5State {
+  let a = aa; let b = bb; let c = cc; let d = dd;
+  for (let i = 0; i < 16; i++) {
+    const val = md5Op(F, a, b, c, d, X[i], T[i]);
+    a = d;
+    d = c;
+    c = b;
+    b = (b + rotl(val, S1[i % 4])) >>> 0;
+  }
+  return [a, b, c, d];
+}
+
+function round2(aa: number, bb: number, cc: number, dd: number, X: number[]): MD5State {
+  let a = aa; let b = bb; let c = cc; let d = dd;
+  for (let i = 0; i < 16; i++) {
+    const k = (5 * i + 1) % 16;
+    const val = md5Op(G, a, b, c, d, X[k], T[16 + i]);
+    a = d;
+    d = c;
+    c = b;
+    b = (b + rotl(val, S2[i % 4])) >>> 0;
+  }
+  return [a, b, c, d];
+}
+
+function round3(aa: number, bb: number, cc: number, dd: number, X: number[]): MD5State {
+  let a = aa; let b = bb; let c = cc; let d = dd;
+  for (let i = 0; i < 16; i++) {
+    const k = (3 * i + 5) % 16;
+    const val = md5Op(H, a, b, c, d, X[k], T[32 + i]);
+    a = d;
+    d = c;
+    c = b;
+    b = (b + rotl(val, S3[i % 4])) >>> 0;
+  }
+  return [a, b, c, d];
+}
+
+function round4(aa: number, bb: number, cc: number, dd: number, X: number[]): MD5State {
+  let a = aa; let b = bb; let c = cc; let d = dd;
+  for (let i = 0; i < 16; i++) {
+    const k = (7 * i) % 16;
+    const val = md5Op(I, a, b, c, d, X[k], T[48 + i]);
+    a = d;
+    d = c;
+    c = b;
+    b = (b + rotl(val, S4[i % 4])) >>> 0;
+  }
+  return [a, b, c, d];
 }
 
 // ---- 纯 JavaScript 工具函数 ----
