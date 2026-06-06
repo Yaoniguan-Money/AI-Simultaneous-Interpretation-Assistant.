@@ -1,35 +1,46 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import type { SubtitleEntry } from '../../types/subtitle';
+import type { SubtitleFontSize } from '../../types';
 import { CorrectionBadge } from './CorrectionBadge';
+
+/** 字号 → CSS class 映射，保持原文 < 译文的视觉层级 */
+const SIZE_CLASS: Record<SubtitleFontSize, { translation: string; original: string }> = {
+  sm: { translation: 'text-subtitle-sm', original: 'text-[12px]' },
+  md: { translation: 'text-subtitle-md', original: 'text-subtitle-sm' },
+  lg: { translation: 'text-subtitle-lg', original: 'text-subtitle-md' },
+};
 
 /** 单条字幕行——流式显示 + 修正动画 */
 export function SubtitleLine({
   entry,
   showOriginal,
+  fontSize,
 }: {
   entry: SubtitleEntry;
   showOriginal: boolean;
+  fontSize: SubtitleFontSize;
 }): JSX.Element {
   const hasCorrection = entry.correction !== null;
+  const cls = SIZE_CLASS[fontSize];
 
   return (
     <div className="flex flex-col items-center gap-0.5">
       {/* 英文原文（双语模式） */}
       {showOriginal && entry.original && (
-        <p className="bg-subtitle-bg px-4 py-1 rounded-lg text-subtitle-sm text-subtitle-faded text-center leading-relaxed max-w-full break-words">
+        <p className={`bg-subtitle-bg px-4 py-1 rounded-lg ${cls.original} text-subtitle-faded text-center leading-relaxed max-w-full break-words`}>
           {entry.original}
         </p>
       )}
 
       {/* 中文翻译 */}
       {hasCorrection ? (
-        <CorrectionTransition entry={entry} />
+        <CorrectionTransition entry={entry} fontSize={fontSize} />
       ) : (
         <motion.p
           initial={{ opacity: 0 }}
           animate={{ opacity: entry.isComplete ? 1 : 0.9 }}
           transition={{ duration: 0.2 }}
-          className="bg-subtitle-bg px-4 py-1.5 rounded-lg text-subtitle-md text-subtitle-text font-medium text-center leading-relaxed max-w-full break-words"
+          className={`bg-subtitle-bg px-4 py-1.5 rounded-lg ${cls.translation} text-subtitle-text font-medium text-center leading-relaxed max-w-full break-words`}
         >
           {entry.translation}
         </motion.p>
@@ -44,8 +55,15 @@ export function SubtitleLine({
 }
 
 /** 修正过渡动画：旧文字灰淡出 → 新文字淡入 */
-function CorrectionTransition({ entry }: { entry: SubtitleEntry }): JSX.Element | null {
+function CorrectionTransition({
+  entry,
+  fontSize,
+}: {
+  entry: SubtitleEntry;
+  fontSize: SubtitleFontSize;
+}): JSX.Element | null {
   if (!entry.correction) return null;
+  const cls = SIZE_CLASS[fontSize];
 
   return (
     <AnimatePresence mode="wait">
@@ -55,7 +73,7 @@ function CorrectionTransition({ entry }: { entry: SubtitleEntry }): JSX.Element 
           initial={{ opacity: 1, color: '#FFFFFF' }}
           animate={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
-          className="bg-subtitle-bg px-4 py-1.5 rounded-lg text-subtitle-sm line-through text-subtitle-faded text-center leading-relaxed max-w-full break-words"
+          className={`bg-subtitle-bg px-4 py-1.5 rounded-lg ${cls.original} line-through text-subtitle-faded text-center leading-relaxed max-w-full break-words`}
         >
           {entry.correction.oldText}
         </motion.p>
@@ -64,7 +82,7 @@ function CorrectionTransition({ entry }: { entry: SubtitleEntry }): JSX.Element 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.2, delay: 0.2 }}
-          className="bg-subtitle-bg px-4 py-1.5 rounded-lg text-subtitle-md text-subtitle-text font-medium text-center leading-relaxed max-w-full break-words"
+          className={`bg-subtitle-bg px-4 py-1.5 rounded-lg ${cls.translation} text-subtitle-text font-medium text-center leading-relaxed max-w-full break-words`}
         >
           {entry.translation}
         </motion.p>

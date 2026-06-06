@@ -12,6 +12,7 @@ import {
   createOverlayWindow,
   getOverlayWindow,
   hideOverlayWindow,
+  resizeOverlayWindow,
 } from './overlay-window';
 
 /** 主控制窗口引用 */
@@ -124,4 +125,9 @@ ipcMain.handle(IPC_CHANNELS.SUBTITLE_UPDATE, (_event, data: unknown) => {
   if (overlay) {
     overlay.webContents.send(IPC_CHANNELS.SUBTITLE_UPDATE, data);
   }
+});
+
+/** 悬浮窗尺寸调整：OverlayWindow 渲染进程 → 主进程 */
+ipcMain.handle(IPC_CHANNELS.OVERLAY_RESIZE, (_event, width: number, height: number) => {
+  resizeOverlayWindow(width, height);
 });

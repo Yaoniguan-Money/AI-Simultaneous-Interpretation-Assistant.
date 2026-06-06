@@ -25,6 +25,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendSubtitleUpdate: (data: unknown): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.SUBTITLE_UPDATE, data),
   /**
+   * 请求主进程调整悬浮窗尺寸（OverlayWindow 渲染进程调用）
+   * @param width 窗口宽度（像素）
+   * @param height 窗口高度（像素）
+   */
+  resizeOverlay: (width: number, height: number): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.OVERLAY_RESIZE, width, height),
+  /**
    * 接收字幕数据更新（OverlayWindow 渲染进程调用）
    * @param callback 收到新字幕数据时的回调
    * @returns 取消监听的清理函数

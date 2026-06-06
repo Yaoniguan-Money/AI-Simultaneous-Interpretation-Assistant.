@@ -7,12 +7,17 @@ import type {
   TranslationResult,
 } from '../llm/types';
 import { SentenceSegmenter } from './sentence-segmenter';
+import type { SegmenterConfig } from './sentence-segmenter';
 import { AudioRingBuffer } from '../../utils/audio-ring-buffer';
 
 /** 管线配置 */
 export interface PipelineConfig {
   /** 翻译历史保留句数，用于修正检测的上下文回溯 */
   historySize?: number;
+  /** 强制交付阈值（毫秒）——ASR 连续发 interim 超此时间未发 final 时强制交付 */
+  forceDeliveryMs?: number;
+  /** 分句器配置——覆盖默认的静音阈值和最大缓冲时长 */
+  segmenterConfig?: SegmenterConfig;
 }
 
 /** 默认配置 */
@@ -20,9 +25,12 @@ const DEFAULTS = {
   HISTORY_SIZE: 5,
   /** 环形缓冲区容量——8 个 chunk × 128ms ≈ 1s 缓冲深度 */
   RING_BUFFER_CAPACITY: 8,
-  /** 强制交付阈值（毫秒）——ASR 连续发 interim 超此时间未发 final，
-   *  取最新 interim 作为伪 final 送入分段器，避免长句长时间无翻译 */
-  FORCE_DELIVERY_MS: 3000,
+  /**
+   * 强制交付阈值（毫秒）——ASR 连续发 interim 超此时间未发 final，
+   * 取最新 interim 作为伪 final 送入分段器，避免长句长时间无翻译。
+   * 5s 给 ASR 充足时间确认 final，与分句器 4s maxBufferMs 配合不冲突。
+   */
+  FORCE_DELIVERY_MS: 5000,
 } as const;
 
 /** 翻译结果回调 */
@@ -40,8 +48,9 @@ export type PipelineErrorCallback = (error: Error) => void;
  * 通过构造函数注入 ASR 和 LLM 接口，不绑定任何具体供应商
  */
 export class FastChannelPipeline {
-  private readonly segmenter = new SentenceSegmenter();
+  private readonly segmenter: SentenceSegmenter;
   private readonly historySize: number;
+  private readonly forceDeliveryMs: number;
   private readonly ringBuffer = new AudioRingBuffer(DEFAULTS.RING_BUFFER_CAPACITY);
   private translatedSentences: TranslatedSentence[] = [];
   private translationCallbacks = new Set<TranslationCallback>();
@@ -62,6 +71,10 @@ export class FastChannelPipeline {
     config: PipelineConfig = {},
   ) {
     this.historySize = config.historySize ?? DEFAULTS.HISTORY_SIZE;
+    /** 分句器通过配置注入阈值，遵循无硬编码原则 */
+    this.segmenter = new SentenceSegmenter(config.segmenterConfig);
+    /** 强制交付阈值通过配置注入，可被 PipelineConfig.forceDeliveryMs 覆盖 */
+    this.forceDeliveryMs = config.forceDeliveryMs ?? DEFAULTS.FORCE_DELIVERY_MS;
   }
 
   /** 注册翻译结果回调，返回取消注册函数 */
@@ -154,7 +167,7 @@ export class FastChannelPipeline {
         /** 长时间无 final 则强制交付——取最新 interim 作为伪 final 送入分段器 */
         if (
           this.lastFinalTimestamp > 0 &&
-          Date.now() - this.lastFinalTimestamp > DEFAULTS.FORCE_DELIVERY_MS
+          Date.now() - this.lastFinalTimestamp > this.forceDeliveryMs
         ) {
           await this.forceDeliverInterim(item.timestamp);
         }
