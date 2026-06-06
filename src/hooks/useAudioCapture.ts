@@ -173,6 +173,11 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
 
     /** latencyHint: interactive 让浏览器优先降低延迟——桌面端 Electron 无省电限制，效果最佳 */
     const audioCtx = new AudioContext({ sampleRate, latencyHint: DEFAULTS.LATENCY_HINT });
+    /** 确保 AudioContext 处于运行状态——getDisplayMedia 弹出系统对话框会断裂 user gesture 链，
+     *  导致 Chromium autoplay policy 将 AudioContext 初始化为 suspended，onaudioprocess 不触发 */
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
     contextRef.current = audioCtx;
 
     const sourceNode = audioCtx.createMediaStreamSource(stream);

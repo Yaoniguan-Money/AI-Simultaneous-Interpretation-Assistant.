@@ -65,11 +65,14 @@ export class IFlyTekASR implements ASRProvider {
   private ws: WebSocket | null = null;
   private config: ASRConfig | null = null;
 
-  /** 结果队列——onmessage 逐条追加，recognize() 一次性消费，解决单槽覆盖丢失问题 */
+  /** onmessage 写入的识别结果 FIFO 队列——recognize() 非阻塞取走，防止单槽覆盖导致结果丢失 */
   private resultQueue: ASRResult[] = [];
 
   /** 从队列中分离出的 interim 结果暂存——供 drainInterimResults() 外部拉取 */
   private pendingInterim: ASRResult[] = [];
+
+  /** 连接进行中 Promise——防止并发 processChunk 触发多个并行 connect() 产生孤儿 WebSocket */
+  private connectingPromise: Promise<void> | null = null;
 
   // ---- 公共接口 ----
 
@@ -182,55 +185,68 @@ export class IFlyTekASR implements ASRProvider {
    * 分两阶段：①等待 WebSocket open + ②等待服务端 started 确认
    */
   private async connect(cfg: ASRConfig): Promise<void> {
-    const url = await buildAuthUrl(cfg);
-    this.ws = new WebSocket(url);
-    this.resultQueue = [];
-    this.pendingInterim = [];
-    let connectTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 连接锁：已有进行中的连接则复用其 Promise，避免并发 processChunk 产生孤儿 WebSocket */
+    if (this.connectingPromise) {
+      return this.connectingPromise;
+    }
 
-    /** 阶段 ①：等待 WebSocket 连接建立 */
-    await new Promise<void>((resolve, reject) => {
-      this.ws!.onopen = () => {
-        if (connectTimer) clearTimeout(connectTimer);
-        resolve();
-      };
-      this.ws!.onerror = () => {
-        if (connectTimer) clearTimeout(connectTimer);
-        reject(new Error('WebSocket 连接失败'));
-      };
-      connectTimer = setTimeout(
-        () => reject(new Error('WebSocket 连接超时')),
-        PROTOCOL.CONNECT_TIMEOUT,
-      );
-    });
-
-    /** 阶段 ②：等待 RTASR 握手确认 */
-    await this.awaitHandshake();
-
-    /** 阶段 ③：注册结果处理器——结果追加到队列，recognize() 消费时批量取出 */
-    this.ws.onmessage = (event: MessageEvent) => {
-      try {
-        const msg = JSON.parse(event.data as string) as RTASRWsMessage;
-
-        if (msg.action === 'error') {
-          console.error(`[RTASR] 服务端错误: ${msg.desc} (code: ${msg.code})`);
-          return;
-        }
-
-        if (msg.action === 'result' && msg.data) {
-          const result = extractRTASRResult(msg.data);
-          if (result) {
-            this.resultQueue.push(result);
-          }
-        }
-      } catch { /* JSON 解析失败，忽略本条消息 */ }
-    };
-
-    /** 服务端主动关闭——清空队列，下次 recognize() 调用时自动重连 */
-    this.ws.onclose = () => {
+    this.connectingPromise = (async (): Promise<void> => {
+      const url = await buildAuthUrl(cfg);
+      this.ws = new WebSocket(url);
       this.resultQueue = [];
       this.pendingInterim = [];
-    };
+      let connectTimer: ReturnType<typeof setTimeout> | null = null;
+
+      /** 阶段 ①：等待 WebSocket 连接建立 */
+      await new Promise<void>((resolve, reject) => {
+        this.ws!.onopen = () => {
+          if (connectTimer) clearTimeout(connectTimer);
+          resolve();
+        };
+        this.ws!.onerror = () => {
+          if (connectTimer) clearTimeout(connectTimer);
+          reject(new Error('WebSocket 连接失败'));
+        };
+        connectTimer = setTimeout(
+          () => reject(new Error('WebSocket 连接超时')),
+          PROTOCOL.CONNECT_TIMEOUT,
+        );
+      });
+
+      /** 阶段 ②：等待 RTASR 握手确认 */
+      await this.awaitHandshake();
+
+      /** 阶段 ③：注册结果处理器——结果追加到队列，recognize() 消费时批量取出 */
+      this.ws.onmessage = (event: MessageEvent) => {
+        try {
+          const msg = JSON.parse(event.data as string) as RTASRWsMessage;
+
+          if (msg.action === 'error') {
+            console.error(`[RTASR] 服务端错误: ${msg.desc} (code: ${msg.code})`);
+            return;
+          }
+
+          if (msg.action === 'result' && msg.data) {
+            const result = extractRTASRResult(msg.data);
+            if (result) {
+              this.resultQueue.push(result);
+            }
+          }
+        } catch { /* JSON 解析失败，忽略本条消息 */ }
+      };
+
+      /** 服务端主动关闭——清空队列，下次 recognize() 调用时自动重连 */
+      this.ws.onclose = () => {
+        this.resultQueue = [];
+        this.pendingInterim = [];
+      };
+    })();
+
+    try {
+      await this.connectingPromise;
+    } finally {
+      this.connectingPromise = null;
+    }
   }
 
   /**

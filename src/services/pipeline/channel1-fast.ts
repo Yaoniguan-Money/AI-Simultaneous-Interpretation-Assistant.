@@ -87,6 +87,9 @@ export class FastChannelPipeline {
     this.ringBuffer.clear();
     this.segmenter.reset();
     this.translatedSentences = [];
+    /** 释放外部资源：ASR WebSocket 连接和 LLM 进行中的 HTTP 流 */
+    this.asr.dispose();
+    this.llm.dispose();
   }
 
   /** 话题切换时重置翻译记忆，不停止管线 */
