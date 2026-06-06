@@ -24,7 +24,7 @@ function createMainWindow(): void {
     resizable: true,
     title: APP_NAME,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },

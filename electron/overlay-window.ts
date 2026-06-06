@@ -40,7 +40,7 @@ export function createOverlayWindow(): BrowserWindow {
     hasShadow: false,
     backgroundColor: '#00000000',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
