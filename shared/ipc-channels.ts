@@ -11,4 +11,6 @@ export const IPC_CHANNELS = {
   CREDENTIALS_LOAD: 'credentials:load',
   /** 字幕数据推送：MainWindow → 主进程 → OverlayWindow */
   SUBTITLE_UPDATE: 'subtitle:update',
+  /** 悬浮窗尺寸调整：OverlayWindow 渲染进程 → 主进程 */
+  OVERLAY_RESIZE: 'overlay:resize',
 } as const;

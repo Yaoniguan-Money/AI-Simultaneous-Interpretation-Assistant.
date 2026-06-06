@@ -6,7 +6,9 @@ import {
   audioSourceAtom,
   bilingualAtom,
   llmConfigAtom,
+  subtitleFontSizeAtom,
 } from '../../stores/settings-store';
+import type { SubtitleFontSize } from '../../types';
 import { useTranslationSession } from '../../hooks/useTranslationSession';
 import { useCredentialPersistence } from '../../hooks/useCredentialPersistence';
 import { useSubtitleSync } from '../../hooks/useSubtitleSync';
@@ -24,6 +26,7 @@ export function MainWindow(): JSX.Element {
   const [appVersion, setAppVersion] = useState<string>('');
   const [bilingual, setBilingual] = useAtom(bilingualAtom);
   const [audioSource, setAudioSource] = useAtom(audioSourceAtom);
+  const [fontSize, setFontSize] = useAtom(subtitleFontSizeAtom);
 
   const asrConfig = useAtomValue(asrConfigAtom);
   const llmConfig = useAtomValue(llmConfigAtom);
@@ -84,8 +87,10 @@ export function MainWindow(): JSX.Element {
             error={error}
             bilingual={bilingual}
             audioSource={audioSource}
+            fontSize={fontSize}
             onBilingualChange={setBilingual}
             onAudioSourceChange={setAudioSource}
+            onFontSizeChange={setFontSize}
             onStart={handleStart}
             onStop={handleStop}
             onNavigate={setActiveView}
@@ -108,8 +113,8 @@ export function MainWindow(): JSX.Element {
 
 /** 主视图（默认） */
 function MainView({
-  isTranslating, isStarting, isConfigured, error, bilingual, audioSource, onBilingualChange,
-  onAudioSourceChange, onStart, onStop, onNavigate,
+  isTranslating, isStarting, isConfigured, error, bilingual, audioSource, fontSize,
+  onBilingualChange, onAudioSourceChange, onFontSizeChange, onStart, onStop, onNavigate,
 }: {
   isTranslating: boolean;
   isStarting: boolean;
@@ -117,8 +122,10 @@ function MainView({
   error: string | null;
   bilingual: boolean;
   audioSource: string;
+  fontSize: SubtitleFontSize;
   onBilingualChange: (v: boolean) => void;
   onAudioSourceChange: (v: 'system' | 'microphone') => void;
+  onFontSizeChange: (v: SubtitleFontSize) => void;
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
   onNavigate: (v: ActiveView) => void;
@@ -219,6 +226,27 @@ function MainView({
         />
         双语字幕（原文 + 译文）
       </label>
+
+      {/* 字幕字号选择 */}
+      <div className="flex gap-2 w-full mb-5">
+        {(['sm', 'md', 'lg'] as const).map((size) => {
+          const labels: Record<SubtitleFontSize, string> = { sm: '小', md: '中', lg: '大' };
+          return (
+            <button
+              key={size}
+              onClick={() => onFontSizeChange(size)}
+              className={
+                'flex-1 py-2.5 rounded-btn transition-all text-[12px] font-semibold ' +
+                (fontSize === size
+                  ? 'border-[1.5px] border-border-active bg-white text-text-primary'
+                  : 'border border-transparent bg-surface-muted text-text-muted hover:bg-surface-hover')
+              }
+            >
+              {labels[size]}
+            </button>
+          );
+        })}
+      </div>
 
       {/* 菜单卡片 */}
       <div className="w-full space-y-1.5">

@@ -1,7 +1,7 @@
 import { useAtomValue } from 'jotai';
 import { useRef } from 'react';
 import { subtitleStackAtom } from '../../stores/session-store';
-import { bilingualAtom } from '../../stores/settings-store';
+import { bilingualAtom, subtitleFontSizeAtom } from '../../stores/settings-store';
 import { SubtitleLine } from './SubtitleLine';
 
 /** 字幕最短显示时长（毫秒）——防止长句被后续短句瞬间挤出 */
@@ -14,6 +14,7 @@ const MIN_DISPLAY_MS = 3000;
 export function SubtitleStack(): JSX.Element {
   const stack = useAtomValue(subtitleStackAtom);
   const bilingual = useAtomValue(bilingualAtom);
+  const fontSize = useAtomValue(subtitleFontSizeAtom);
 
   /** 跟踪每条字幕首次渲染时间，用于最短显示时长保护 */
   const firstShown = useRef<Map<number, number>>(new Map());
@@ -56,6 +57,7 @@ export function SubtitleStack(): JSX.Element {
           key={entry.id}
           entry={entry}
           showOriginal={bilingual}
+          fontSize={fontSize}
         />
       ))}
     </div>

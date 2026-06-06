@@ -1,3 +1,5 @@
+import type { SubtitleFontSize } from './index';
+
 /** 字幕条目——一条翻译结果 */
 export interface SubtitleEntry {
   /** 唯一标识 */
@@ -23,7 +25,7 @@ export interface SubtitleCorrection {
 
 /**
  * 字幕 IPC 推送负载 —— MainWindow → 主进程 → OverlayWindow
- * 将渲染所需全部数据（字幕条目 + 双语开关）单次传输，
+ * 将渲染所需全部数据（字幕条目 + 双语开关 + 字号）单次传输，
  * 避免 Jotai atom 无法跨 Electron 进程共享的问题
  */
 export interface SubtitlePayload {
@@ -31,4 +33,6 @@ export interface SubtitlePayload {
   entries: SubtitleEntry[];
   /** 双语字幕开关状态 */
   bilingual: boolean;
+  /** 当前字幕字号，OverlayWindow 据此动态渲染 */
+  fontSize: SubtitleFontSize;
 }

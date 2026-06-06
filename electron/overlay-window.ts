@@ -79,6 +79,16 @@ export function closeOverlayWindow(): void {
   }
 }
 
+/** 调整悬浮窗尺寸并保持底部居中 */
+export function resizeOverlayWindow(width: number, height: number): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
+  const x = Math.round((screenWidth - width) / 2);
+  const y = screenHeight - height - 40;
+  overlayWindow.setSize(width, height);
+  overlayWindow.setPosition(x, y);
+}
+
 /** 获取字幕悬浮窗引用（供主进程 IPC 转发字幕数据使用） */
 export function getOverlayWindow(): BrowserWindow | null {
   if (overlayWindow && !overlayWindow.isDestroyed()) {
