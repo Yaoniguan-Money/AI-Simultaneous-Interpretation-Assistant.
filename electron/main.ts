@@ -1,6 +1,10 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage } from 'electron';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+/** ESM 环境下 __dirname 不可用，手动构造 */
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { IPC_CHANNELS } from '../shared/ipc-channels';
 import { APP_NAME } from '../shared/app-config';
 import {

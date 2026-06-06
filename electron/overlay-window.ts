@@ -1,5 +1,9 @@
 import { BrowserWindow, screen } from 'electron';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+/** ESM 环境下 __dirname 不可用，手动构造 */
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** 默认窗口尺寸 */
 const DEFAULTS = {
