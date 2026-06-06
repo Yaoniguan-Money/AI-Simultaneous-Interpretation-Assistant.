@@ -44,6 +44,23 @@ interface StreamChunk {
 export class DeepSeekLLM implements LLMProvider {
   readonly name = 'deepseek';
 
+  /**
+   * LLM 常见拒绝/占位响应模式——这些不是有效翻译，必须丢弃
+   * 当 LLM 收到空输入或无法理解的文本时可能返回此类响应
+   */
+  private static readonly REJECTION_PATTERNS: ReadonlySet<string> = new Set([
+    '请提供需要翻译的英语',
+    '请提供需要翻译的文本',
+    '请提供需要翻译的',
+    '请提供英语',
+    '请提供文本',
+    '请输入需要翻译',
+    '抱歉，我无法翻译',
+    'I cannot translate',
+    'Please provide text',
+    'Please provide the text',
+  ]);
+
   private config: LLMConfig | null = null;
   private abortController: AbortController | null = null;
 
@@ -295,7 +312,7 @@ export class DeepSeekLLM implements LLMProvider {
   /**
    * 清理 LLM 输出中可能混入的思考过程/分析文字
    * 防御层——主要依赖系统提示词的"只输出翻译"指令来防止，
-   * 此方法通过中文字符占比过滤 + 前缀裁剪作为兜底
+   * 此方法通过中文字符占比过滤 + 拒绝模式检测 + 前缀裁剪作为兜底
    */
   private sanitizeTranslation(text: string): string {
     if (!text) return text;
@@ -305,12 +322,23 @@ export class DeepSeekLLM implements LLMProvider {
     const totalChars = text.replace(/\s/g, '').length;
     if (totalChars === 0 || cjkCount / totalChars < 0.1) return '';
 
+    /** 检测 LLM 拒绝/占位响应——命中已知模式则丢弃 */
+    if (DeepSeekLLM.isRejectionResponse(text)) return '';
+
     /** 裁剪第一个中文字符前的思考前缀 */
     const firstCjk = text.search(/[一-鿿]/);
     if (firstCjk > 0) {
       return text.slice(firstCjk).trim();
     }
     return text.trim();
+  }
+
+  /** 检测文本是否命中 LLM 拒绝/占位响应模式 */
+  private static isRejectionResponse(text: string): boolean {
+    for (const pattern of DeepSeekLLM.REJECTION_PATTERNS) {
+      if (text.includes(pattern)) return true;
+    }
+    return false;
   }
 
   /** 去除修正标记并清理思考文字后的纯净译文 */

@@ -129,31 +129,22 @@ export function useTranslationSession(
     });
 
     /**
-     * ASR interim 结果回调 → 实时更新字幕原文
-     * 用户在说话时立即看到 ASR 识别中的英文原文，LLM 翻译完成后覆盖为中文
+     * ASR interim 结果回调 → 实时更新活跃字幕原文
+     * 仅在有翻译进行中时更新原文字段（提升 ASR 实时识别精度），
+     * 不创建纯原文的空翻译条目——确保每条可见字幕同时包含英文原文和中文翻译
      */
     pipeline.onInterimResult((text: string) => {
       if (!text) return;
       setSubtitleStack((prev) => {
         const activeId = activeIdRef.current;
         if (activeId !== null) {
-          /** 更新现有字幕的原文——用户看到实时变化的识别文本 */
+          /** 更新当前活跃字幕的原文——提升 ASR 实时识别精度 */
           return prev.map((e) =>
             e.id === activeId ? { ...e, original: text } : e,
           );
         }
-        /** 首个 interim 结果：创建无翻译的新字幕条目，原文以灰色展示 */
-        const id = ++idCounterRef.current;
-        activeIdRef.current = id;
-        const entry: SubtitleEntry = {
-          id,
-          timestamp: Date.now(),
-          original: text,
-          translation: '',
-          isComplete: false,
-          correction: null,
-        };
-        return [...prev, entry];
+        /** 无活跃字幕时不创建新条目——等待 LLM 翻译到达时由 onTranslation 统一创建 */
+        return prev;
       });
     });
 

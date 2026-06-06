@@ -33,6 +33,12 @@ const DEFAULTS = {
   FORCE_DELIVERY_MS: 5000,
 } as const;
 
+/**
+ * 最小可翻译文本长度（字符数）
+ * 过滤 ASR 噪音和空输入，避免 LLM 收到无意义文本后返回占位/拒绝响应
+ */
+const MIN_TRANSLATABLE_LENGTH = 2;
+
 /** 翻译结果回调 */
 export type TranslationCallback = (result: TranslationResult) => void;
 
@@ -248,6 +254,9 @@ export class FastChannelPipeline {
 
   /** 翻译单个句子，流式产出结果并通知回调 */
   private async translateSentence(text: string): Promise<void> {
+    /** 输入校验——过滤空输入和噪音文本，避免 LLM 返回占位/拒绝响应 */
+    if (!this.isTranslatable(text)) return;
+
     const request = this.buildTranslationRequest(text);
     let finalResult: TranslationResult | null = null;
 
@@ -293,6 +302,18 @@ export class FastChannelPipeline {
         cb({ translation, corrections, tokens: [] }),
       );
     }
+  }
+
+  /**
+   * 判定文本是否值得发送 LLM 翻译
+   * 过滤空输入、过短噪音、纯标点/数字——这些输入会导致 LLM 返回占位/拒绝响应
+   */
+  private isTranslatable(text: string): boolean {
+    const trimmed = text.trim();
+    if (trimmed.length < MIN_TRANSLATABLE_LENGTH) return false;
+    /** 必须包含至少一个英文字母——纯标点/数字/空白不需要翻译 */
+    if (!/[a-zA-Z]/.test(trimmed)) return false;
+    return true;
   }
 
   /** 构建翻译请求，注入共享上下文和翻译历史 */

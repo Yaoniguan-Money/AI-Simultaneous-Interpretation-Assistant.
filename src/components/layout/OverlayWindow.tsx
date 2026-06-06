@@ -1,15 +1,19 @@
 import { useAtomValue } from 'jotai';
 import { useEffect } from 'react';
-import { subtitleFontSizeAtom } from '../../stores/settings-store';
+import { bilingualAtom, subtitleFontSizeAtom } from '../../stores/settings-store';
 import type { SubtitleFontSize } from '../../types';
 import { SubtitleStack } from '../subtitle/SubtitleStack';
 import { useSubtitleReceiver } from '../../hooks/useSubtitleReceiver';
 
-/** 字号 → 悬浮窗高度映射，覆盖双语模式 2 行文本 + 内边距 + 底部留白 */
-const OVERLAY_HEIGHT: Record<SubtitleFontSize, number> = {
-  sm: 90,
-  md: 100,
-  lg: 130,
+/**
+ * 悬浮窗高度映射：fontSize × 双语模式 → 像素
+ * 覆盖 3 条字幕（MIN_DISPLAY_MS 保护扩展）+ 内边距 + 底部留白的最坏情况
+ * 单语模式仅显示中文翻译行，双语模式额外显示英文原文行
+ */
+const OVERLAY_HEIGHT: Record<SubtitleFontSize, { single: number; bilingual: number }> = {
+  sm:  { single: 120, bilingual: 170 },
+  md:  { single: 140, bilingual: 200 },
+  lg:  { single: 170, bilingual: 260 },
 };
 
 /** 悬浮窗固定宽度 */
@@ -25,12 +29,14 @@ export function OverlayWindow(): JSX.Element {
   /** 启动 IPC 字幕数据接收，将 MainWindow 推送的字幕写入本地 Jotai atom */
   useSubtitleReceiver();
   const fontSize = useAtomValue(subtitleFontSizeAtom);
+  const bilingual = useAtomValue(bilingualAtom);
 
-  /** 字号变化时请求主进程调整悬浮窗尺寸 */
+  /** 字号或双语模式变化时请求主进程调整悬浮窗尺寸 */
   useEffect(() => {
-    const height = OVERLAY_HEIGHT[fontSize];
+    const mode = bilingual ? 'bilingual' : 'single';
+    const height = OVERLAY_HEIGHT[fontSize][mode];
     window.electronAPI?.resizeOverlay(OVERLAY_WIDTH, height);
-  }, [fontSize]);
+  }, [fontSize, bilingual]);
 
   return (
     <div className="w-full h-full flex flex-col items-center justify-end pointer-events-none pb-4">
