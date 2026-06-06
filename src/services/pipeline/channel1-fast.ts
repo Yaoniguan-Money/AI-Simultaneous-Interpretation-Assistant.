@@ -37,8 +37,14 @@ export class FastChannelPipeline {
   private translationCallbacks = new Set<TranslationCallback>();
   private errorCallbacks = new Set<PipelineErrorCallback>();
   private active = false;
-  /** 处理锁：防止并发 ASR 调用导致内部状态冲突 */
-  private processing = false;
+  /** 翻译中标记——翻译期间 ASR 结果暂存至队列，而非丢弃 */
+  private translating = false;
+  /** 翻译期间暂存的 ASR 结果，翻译完成后按 FIFO 顺序统一排空处理 */
+  private pendingResults: Array<{
+    text: string;
+    timestamp: number;
+    isFinal: boolean;
+  }> = [];
 
   constructor(
     private asr: ASRProvider,
@@ -72,16 +78,22 @@ export class FastChannelPipeline {
     this.active = false;
     this.segmenter.reset();
     this.translatedSentences = [];
+    this.pendingResults = [];
+    /** 释放外部资源：ASR WebSocket 连接和 LLM 进行中的 HTTP 流 */
+    this.asr.dispose();
+    this.llm.dispose();
   }
 
   /** 话题切换时重置翻译记忆，不停止管线 */
   resetContext(): void {
     this.translatedSentences = [];
+    this.pendingResults = [];
   }
 
   /**
-   * 处理一段音频数据，内部串行化防止并发
-   * 流程：ASR 识别 → 语义分句 → LLM 翻译 → 回调通知
+   * 处理一段音频数据
+   * 第一步（始终执行）：发送音频到 ASR，保证 RTASR 连接不进入空闲超时
+   * 第二步（翻译空闲时）：分句 + LLM 翻译，翻译期间新到结果暂存至队列
    * @param audio PCM 16kHz 16bit mono 音频数据
    * @param timestamp 音频时间戳（毫秒）
    */
@@ -89,31 +101,25 @@ export class FastChannelPipeline {
     if (!this.active) return;
     if (!audio || audio.length === 0) return;
 
-    /** 处理锁：正在处理前一个 chunk 时跳过当前 chunk，避免并发 */
-    if (this.processing) return;
-    this.processing = true;
-
     try {
-      /** 第一步：ASR 识别 */
+      /** 第一步：始终发送音频到 ASR——即使正在翻译也不阻塞 */
       const asrResult = await this.asr.recognize(audio);
-      if (!asrResult.text) { this.processing = false; return; }
+      if (!asrResult.text) return;
 
-      /** 第二步：语义分句 */
-      const sentences = this.segmenter.push(
-        asrResult.text,
-        timestamp,
-        asrResult.isFinal,
-      );
-
-      /** 第三步：逐句翻译 */
-      for (const sentence of sentences) {
-        if (!this.active) break;
-        await this.translateSentence(sentence);
+      /** 翻译中暂存结果，避免并发进入分句器——翻译完成后统一排空 */
+      if (this.translating) {
+        this.pendingResults.push({
+          text: asrResult.text,
+          timestamp,
+          isFinal: asrResult.isFinal,
+        });
+        return;
       }
+
+      /** 翻译空闲，立即处理当前结果并排空待处理队列 */
+      await this.processASRResult(asrResult.text, timestamp, asrResult.isFinal);
     } catch (error) {
       this.handleError(error);
-    } finally {
-      this.processing = false;
     }
   }
 
@@ -126,6 +132,41 @@ export class FastChannelPipeline {
   }
 
   // ---- 内部 ----
+
+  /**
+   * 串行处理 ASR 结果：分句 → 逐句翻译 → 排空翻译期间积累的待处理结果
+   * 设置 translating 标记防止并发进入分句器，保证分句器内部状态一致性
+   */
+  private async processASRResult(
+    text: string,
+    timestamp: number,
+    isFinal: boolean,
+  ): Promise<void> {
+    this.translating = true;
+    try {
+      await this.translateSentences(
+        this.segmenter.push(text, timestamp, isFinal),
+      );
+
+      /** 排空翻译期间积累的待处理结果 */
+      while (this.pendingResults.length > 0 && this.active) {
+        const pending = this.pendingResults.shift()!;
+        await this.translateSentences(
+          this.segmenter.push(pending.text, pending.timestamp, pending.isFinal),
+        );
+      }
+    } finally {
+      this.translating = false;
+    }
+  }
+
+  /** 逐句翻译，active 为 false 时提前终止——消除 processASRResult 中的 while→for 嵌套 */
+  private async translateSentences(sentences: string[]): Promise<void> {
+    for (const sentence of sentences) {
+      if (!this.active) break;
+      await this.translateSentence(sentence);
+    }
+  }
 
   /** 翻译单个句子，流式产出结果并通知回调 */
   private async translateSentence(text: string): Promise<void> {
