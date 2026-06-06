@@ -17,8 +17,10 @@ export interface SegmenterConfig {
 
 /** 默认配置 */
 const DEFAULTS = {
-  PAUSE_MS: 500,
-  MAX_BUFFER_MS: 2500,
+  /** 静音间隔阈值（毫秒）——300ms 覆盖英语常见句间停顿，平衡分句及时性与完整性 */
+  PAUSE_MS: 300,
+  /** 最大缓冲时长（毫秒）——1.5s 强制交付，防止无停顿长句阻塞流水线 */
+  MAX_BUFFER_MS: 1500,
 } as const;
 
 /** 默认句末标点 */

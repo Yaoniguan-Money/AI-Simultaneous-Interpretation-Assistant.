@@ -7,6 +7,7 @@ import type {
   TranslationResult,
 } from '../llm/types';
 import { SentenceSegmenter } from './sentence-segmenter';
+import { AudioRingBuffer } from '../../utils/audio-ring-buffer';
 
 /** 管线配置 */
 export interface PipelineConfig {
@@ -17,10 +18,15 @@ export interface PipelineConfig {
 /** 默认配置 */
 const DEFAULTS = {
   HISTORY_SIZE: 5,
+  /** 环形缓冲区容量——8 个 chunk × 128ms ≈ 1s 缓冲深度 */
+  RING_BUFFER_CAPACITY: 8,
 } as const;
 
 /** 翻译结果回调 */
 export type TranslationCallback = (result: TranslationResult) => void;
+
+/** ASR interim 结果回调——实时将识别中的原文推送给 UI 展示 */
+export type InterimResultCallback = (text: string) => void;
 
 /** 管线错误回调 */
 export type PipelineErrorCallback = (error: Error) => void;
@@ -33,11 +39,13 @@ export type PipelineErrorCallback = (error: Error) => void;
 export class FastChannelPipeline {
   private readonly segmenter = new SentenceSegmenter();
   private readonly historySize: number;
+  private readonly ringBuffer = new AudioRingBuffer(DEFAULTS.RING_BUFFER_CAPACITY);
   private translatedSentences: TranslatedSentence[] = [];
   private translationCallbacks = new Set<TranslationCallback>();
+  private interimCallbacks = new Set<InterimResultCallback>();
   private errorCallbacks = new Set<PipelineErrorCallback>();
   private active = false;
-  /** 处理锁：防止并发 ASR 调用导致内部状态冲突 */
+  /** 消费锁：防止并发 consumeNext 调用——环形缓冲区已解决音频丢弃问题，此锁仅防并发内部状态冲突 */
   private processing = false;
 
   constructor(
@@ -55,6 +63,12 @@ export class FastChannelPipeline {
     return () => { this.translationCallbacks.delete(callback); };
   }
 
+  /** 注册 ASR interim 结果回调，返回取消注册函数——实时展示识别中的原文 */
+  onInterimResult(callback: InterimResultCallback): () => void {
+    this.interimCallbacks.add(callback);
+    return () => { this.interimCallbacks.delete(callback); };
+  }
+
   /** 注册错误回调，返回取消注册函数 */
   onError(callback: PipelineErrorCallback): () => void {
     this.errorCallbacks.add(callback);
@@ -70,6 +84,7 @@ export class FastChannelPipeline {
   /** 停止管线并清理全部状态 */
   stop(): void {
     this.active = false;
+    this.ringBuffer.clear();
     this.segmenter.reset();
     this.translatedSentences = [];
   }
@@ -80,29 +95,57 @@ export class FastChannelPipeline {
   }
 
   /**
-   * 处理一段音频数据，内部串行化防止并发
-   * 流程：ASR 识别 → 语义分句 → LLM 翻译 → 回调通知
+   * 接收音频数据——非阻塞入队，异步消费
+   *
+   * 环形缓冲区替代了旧版的「处理中则丢弃」策略：
+   * 音频先入 ringBuffer 队列，consumer 从队列取数据逐条处理。
    * @param audio PCM 16kHz 16bit mono 音频数据
    * @param timestamp 音频时间戳（毫秒）
    */
-  async processChunk(audio: Uint8Array, timestamp: number): Promise<void> {
+  processChunk(audio: Uint8Array, timestamp: number): void {
     if (!this.active) return;
     if (!audio || audio.length === 0) return;
 
-    /** 处理锁：正在处理前一个 chunk 时跳过当前 chunk，避免并发 */
-    if (this.processing) return;
-    this.processing = true;
+    this.ringBuffer.enqueue(audio, timestamp);
+    /** 触发异步消费——不使用 await，消费循环自行管理生命周期 */
+    this.consumeNext().catch((e) => this.handleError(e));
+  }
 
+  // ---- 消费循环 ----
+
+  /**
+   * 从环形缓冲区取出一条 chunk，执行 ASR→分句→翻译流水线
+   * 处理完成后递归调用自身消费下一条（异步递归，await 释放栈帧无栈溢出风险）
+   */
+  private async consumeNext(): Promise<void> {
+    if (!this.active) return;
+    /** 消费锁：同一时刻只允许一个 consumeNext 协程在处理 */
+    if (this.processing) return;
+
+    const item = this.ringBuffer.dequeue();
+    if (!item) return;
+
+    this.processing = true;
     try {
       /** 第一步：ASR 识别 */
-      const asrResult = await this.asr.recognize(audio);
-      if (!asrResult.text) { this.processing = false; return; }
+      const asrResult = await this.asr.recognize(item.data);
 
-      /** 第二步：语义分句 */
+      /** 拉取 ASR 供应商的 interim 队列（如有），分发给 UI 实时展示 */
+      this.drainAndDispatchInterim();
+
+      if (!asrResult.text) return;
+
+      if (!asrResult.isFinal) {
+        /** interim 结果：直接推送给字幕 UI 展示原文，不进入分句器 */
+        this.interimCallbacks.forEach((cb) => cb(asrResult.text));
+        return;
+      }
+
+      /** 第二步：语义分句——仅 final 结果参与 */
       const sentences = this.segmenter.push(
         asrResult.text,
-        timestamp,
-        asrResult.isFinal,
+        item.timestamp,
+        true,
       );
 
       /** 第三步：逐句翻译 */
@@ -114,6 +157,26 @@ export class FastChannelPipeline {
       this.handleError(error);
     } finally {
       this.processing = false;
+      /** 继续消费：在处理期间可能有新数据入队的 chunk */
+      this.consumeNext().catch((e) => this.handleError(e));
+    }
+  }
+
+  /**
+   * 尝试从 ASR 供应商拉取 pending interim 结果并分发给 UI
+   * 通过 duck-type 检查 drainInterimResults 方法存在性，供应商无关
+   */
+  private drainAndDispatchInterim(): void {
+    const asr = this.asr as { drainInterimResults?: () => { text: string }[] };
+    if (typeof asr.drainInterimResults !== 'function') return;
+
+    const interimList = asr.drainInterimResults();
+    if (!interimList || interimList.length === 0) return;
+
+    for (const r of interimList) {
+      if (r.text) {
+        this.interimCallbacks.forEach((cb) => cb(r.text));
+      }
     }
   }
 

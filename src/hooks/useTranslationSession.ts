@@ -123,6 +123,35 @@ export function useTranslationSession(
       }
     });
 
+    /**
+     * ASR interim 结果回调 → 实时更新字幕原文
+     * 用户在说话时立即看到 ASR 识别中的英文原文，LLM 翻译完成后覆盖为中文
+     */
+    pipeline.onInterimResult((text: string) => {
+      if (!text) return;
+      setSubtitleStack((prev) => {
+        const activeId = activeIdRef.current;
+        if (activeId !== null) {
+          /** 更新现有字幕的原文——用户看到实时变化的识别文本 */
+          return prev.map((e) =>
+            e.id === activeId ? { ...e, original: text } : e,
+          );
+        }
+        /** 首个 interim 结果：创建无翻译的新字幕条目，原文以灰色展示 */
+        const id = ++idCounterRef.current;
+        activeIdRef.current = id;
+        const entry: SubtitleEntry = {
+          id,
+          timestamp: Date.now(),
+          original: text,
+          translation: '',
+          isComplete: false,
+          correction: null,
+        };
+        return [...prev, entry];
+      });
+    });
+
     /** 管线错误回调 */
     pipeline.onError((err: Error) => {
       setError(err.message);
