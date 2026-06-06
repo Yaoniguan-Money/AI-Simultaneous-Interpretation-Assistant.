@@ -208,7 +208,11 @@ export class DeepSeekLLM implements LLMProvider {
           tokens.push({ text: char, index: tokenIndex++ });
         }
         fullText += content;
-        yield { translation: fullText.trim(), corrections: [], tokens };
+        /** 中间帧也做清洗——避免思考文字在流式字幕中逐字出现 */
+        const sanitized = this.sanitizeTranslation(fullText);
+        if (sanitized) {
+          yield { translation: sanitized, corrections: [], tokens };
+        }
       }
     }
 
@@ -288,9 +292,32 @@ export class DeepSeekLLM implements LLMProvider {
     }
   }
 
-  /** 去除修正标记后的纯净译文 */
+  /**
+   * 清理 LLM 输出中可能混入的思考过程/分析文字
+   * 防御层——主要依赖系统提示词的"只输出翻译"指令来防止，
+   * 此方法通过中文字符占比过滤 + 前缀裁剪作为兜底
+   */
+  private sanitizeTranslation(text: string): string {
+    if (!text) return text;
+
+    /** 统计 CJK 字符占比，低于阈值视为思考文字 */
+    const cjkCount = (text.match(/[一-鿿㐀-䶿]/g) || []).length;
+    const totalChars = text.replace(/\s/g, '').length;
+    if (totalChars === 0 || cjkCount / totalChars < 0.1) return '';
+
+    /** 裁剪第一个中文字符前的思考前缀 */
+    const firstCjk = text.search(/[一-鿿]/);
+    if (firstCjk > 0) {
+      return text.slice(firstCjk).trim();
+    }
+    return text.trim();
+  }
+
+  /** 去除修正标记并清理思考文字后的纯净译文 */
   private cleanOutput(raw: string): string {
-    return raw.replace(/【修正】[\s\S]+$/, '').trim();
+    return this.sanitizeTranslation(
+      raw.replace(/【修正】[\s\S]+$/, ''),
+    );
   }
 
   /** 解析分析 API 的 JSON 响应 */
@@ -344,9 +371,10 @@ function buildTranslatePrompt(): string {
   return [
     '你是一个专业的英译中同声传译助手。请将以下英语句子翻译为流畅、自然的中文。',
     '要求：',
-    '1. 保持口语化，符合中文表达习惯',
-    '2. 专业术语使用提供的术语映射',
-    '3. 如果根据上下文发现前文翻译有误，在末尾以 JSON 数组格式标注修正：',
+    '1. 只输出中文翻译文本，不要输出任何思考过程、分析、解释或开场白',
+    '2. 保持口语化，符合中文表达习惯',
+    '3. 专业术语使用提供的术语映射',
+    '4. 如果根据上下文发现前文翻译有误，在末尾以 JSON 数组格式标注修正：',
     '   【修正】[{"sentenceIndex":0,"oldTranslation":"旧译","newTranslation":"新译","reason":"原因"}]',
   ].join('\n');
 }
