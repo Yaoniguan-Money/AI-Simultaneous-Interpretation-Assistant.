@@ -1,5 +1,5 @@
 import { useAtomValue, useSetAtom } from 'jotai';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ASRConfig } from '../services/asr/types';
 import { createASRProvider } from '../services/asr/factory';
 import type { LLMConfig } from '../services/llm/types';
@@ -16,6 +16,8 @@ import type { TranslationResult } from '../services/llm/types';
 export interface UseTranslationSessionReturn {
   /** 是否正在翻译 */
   isTranslating: boolean;
+  /** 是否正在启动中（音频捕获尚未就绪） */
+  isStarting: boolean;
   /** 错误信息 */
   error: string | null;
   /** ASR 和 LLM 是否均已配置 */
@@ -38,6 +40,7 @@ export function useTranslationSession(
   audioSource: AudioSource,
 ): UseTranslationSessionReturn {
   const [isTranslating, setIsTranslating] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   /** 共享上下文 —— Channel 2 写入，Channel 1 翻译时携带 */
@@ -60,6 +63,13 @@ export function useTranslationSession(
   const audioCapture = useAudioCapture({ source: audioSource });
 
   const isConfigured = asrConfig !== null && llmConfig !== null;
+
+  /** 同步音频捕获错误到会话——设备拔出、静音超时等通过此路径传递到 UI */
+  useEffect(() => {
+    if (audioCapture.error) {
+      setError(audioCapture.error);
+    }
+  }, [audioCapture.error]);
 
   /** 创建并接线管线：工厂 → FastChannelPipeline → 翻译回调写入字幕 atom → 错误回调 ← 38 行，从 start 中提取 */
   async function createPipeline(
@@ -127,9 +137,10 @@ export function useTranslationSession(
       setError('请先配置 ASR 和 LLM 的 API Key');
       return;
     }
-    if (isTranslating) return;
+    if (isStarting || isTranslating) return;
 
     setError(null);
+    setIsStarting(true);
     idCounterRef.current = 0;
     activeIdRef.current = null;
     setSubtitleStack([]);
@@ -146,16 +157,24 @@ export function useTranslationSession(
       audioCleanupRef.current = unsubAudio;
 
       await audioCapture.start();
+      setIsStarting(false);
       setIsTranslating(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '翻译会话启动失败');
+      setIsStarting(false);
+      /** 透传原始错误——音频捕获返回的具体错误（如"未检测到音频输入"）对用户定位问题更有效 */
+      const message = err instanceof Error ? err.message : '翻译会话启动失败';
+      setError(message);
+      /** 清理已注册的 onChunk 回调——start 失败但回调可能已在 audioCapture.start() 前注册 */
+      audioCleanupRef.current?.();
+      audioCleanupRef.current = null;
       pipelineRef.current?.stop();
       pipelineRef.current = null;
     }
-  }, [asrConfig, llmConfig, isTranslating, audioCapture, setSubtitleStack]);
+  }, [asrConfig, llmConfig, isStarting, isTranslating, audioCapture, setSubtitleStack]);
 
   /** 停止翻译：停音频 → 停管线 → 清字幕 */
   const stop = useCallback((): void => {
+    setIsStarting(false);
     audioCapture.stop();
     audioCleanupRef.current?.();
     audioCleanupRef.current = null;
@@ -166,5 +185,5 @@ export function useTranslationSession(
     setSubtitleStack([]);
   }, [audioCapture, setSubtitleStack]);
 
-  return { isTranslating, error, isConfigured, start, stop };
+  return { isTranslating, isStarting, error, isConfigured, start, stop };
 }

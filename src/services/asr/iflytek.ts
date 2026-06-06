@@ -11,10 +11,8 @@ const PROTOCOL = {
   WSS_URL: 'wss://rtasr.xfyun.cn/v1/ws',
   /** 默认识别语言（URL 的 lang 参数） */
   DEFAULT_LANG: 'en',
-  /** 连接建立超时（毫秒） */
+  /** 连接建立/握手超时（毫秒） */
   CONNECT_TIMEOUT: 10000,
-  /** 识别结果等待超时（毫秒），适应 RTASR 推送间隔 */
-  RESPONSE_TIMEOUT: 5000,
 } as const;
 
 /** 凭证字段名，与 ASRConfig.credentials 中的 key 对应 */
@@ -67,12 +65,8 @@ export class IFlyTekASR implements ASRProvider {
   private ws: WebSocket | null = null;
   private config: ASRConfig | null = null;
 
-  /** onmessage 写入的下一个待消费结果 */
+  /** onmessage 写入的下一个待消费结果——recognize() 非阻塞取走，解耦发送与接收 */
   private queuedResult: ASRResult | null = null;
-  /** recognize() 中等待结果的 Promise resolver */
-  private pendingResolve: ((r: ASRResult) => void) | null = null;
-  /** recognize() 的等待超时定时器 */
-  private pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ---- 公共接口 ----
 
@@ -82,9 +76,10 @@ export class IFlyTekASR implements ASRProvider {
   }
 
   /**
-   * 发送一段 PCM 音频数据进行识别
+   * 发送一段 PCM 音频数据进行识别——非阻塞模式
+   * RTASR 是流式协议：发送与接收独立。采用「发送即忘 + 拉取缓存结果」模式，
+   * 解除 processChunk 处理锁期间音频大量丢弃的问题（详见 CLAUDE.md A.4 流处理原则）
    * 音频格式要求：16kHz / 16bit / 单声道 / PCM 原始数据
-   * 返回识别结果——若当前无可用结果则等待，超时返回空结果
    */
   async recognize(audio: Uint8Array): Promise<ASRResult> {
     const cfg = ensureConfigured(this.config, '讯飞 ASR');
@@ -97,29 +92,19 @@ export class IFlyTekASR implements ASRProvider {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         await this.connect(cfg);
       }
-      /** 直接发送二进制 PCM 音频，不做 JSON 包裹或 Base64 编码 */
-      this.ws!.send(audio.buffer);
+      /** 发送 Uint8Array 视图自身——WebSocket 原生支持 ArrayBufferView，自动处理偏移与长度 */
+      this.ws!.send(audio);
     } catch {
       return this.emptyResult(true);
     }
 
-    /** 若 onmessage 已缓存结果，直接返回（避免不必要的异步等待） */
+    /** 拉取 onmessage 缓存的结果——无结果时返回空，不阻塞调用方 */
     if (this.queuedResult) {
       const r = this.queuedResult;
       this.queuedResult = null;
       return r;
     }
-
-    /** 等待服务端推送下一条结果，超时后返回空结果 */
-    return new Promise<ASRResult>((resolve) => {
-      this.pendingResolve = resolve;
-      this.pendingTimer = setTimeout(() => {
-        if (this.pendingResolve) {
-          this.pendingResolve = null;
-          resolve(this.emptyResult(false));
-        }
-      }, PROTOCOL.RESPONSE_TIMEOUT);
-    });
+    return this.emptyResult(false);
   }
 
   dispose(): void {
@@ -134,13 +119,6 @@ export class IFlyTekASR implements ASRProvider {
     this.ws = null;
     this.config = null;
     this.queuedResult = null;
-
-    /** 清理等待中的 Promise */
-    if (this.pendingTimer) clearTimeout(this.pendingTimer);
-    if (this.pendingResolve) {
-      this.pendingResolve(this.emptyResult(true));
-      this.pendingResolve = null;
-    }
   }
 
   /**
@@ -190,47 +168,28 @@ export class IFlyTekASR implements ASRProvider {
     /** 阶段 ②：等待 RTASR 握手确认 */
     await this.awaitHandshake();
 
-    /** 阶段 ③：注册结果处理器 */
+    /** 阶段 ③：注册结果处理器——非阻塞模式，结果统一写入 queuedResult 供 recognize() 拉取 */
     this.ws.onmessage = (event: MessageEvent) => {
       try {
         const msg = JSON.parse(event.data as string) as RTASRWsMessage;
 
-        /** 服务端推送错误 */
         if (msg.action === 'error') {
           console.error(`[RTASR] 服务端错误: ${msg.desc} (code: ${msg.code})`);
-          if (this.pendingResolve) {
-            this.pendingResolve(this.emptyResult(true));
-            this.pendingResolve = null;
-            if (this.pendingTimer) clearTimeout(this.pendingTimer);
-          }
           return;
         }
 
-        /** 识别结果——data 为 JSON 字符串需二次解析 */
         if (msg.action === 'result' && msg.data) {
           const result = extractRTASRResult(msg.data);
-          if (!result) return;
-
-          if (this.pendingResolve) {
-            const resolve = this.pendingResolve;
-            this.pendingResolve = null;
-            if (this.pendingTimer) clearTimeout(this.pendingTimer);
-            resolve(result);
-            if (result.isFinal) this.queuedResult = null;
-          } else {
+          if (result) {
             this.queuedResult = result;
           }
         }
       } catch { /* JSON 解析失败，忽略本条消息 */ }
     };
 
-    /** 服务端主动关闭时清理等待中的识别 */
+    /** 服务端主动关闭——下次 recognize() 调用时自动重连 */
     this.ws.onclose = () => {
-      if (this.pendingResolve) {
-        this.pendingResolve(this.emptyResult(true));
-        this.pendingResolve = null;
-        if (this.pendingTimer) clearTimeout(this.pendingTimer);
-      }
+      this.queuedResult = null;
     };
   }
 

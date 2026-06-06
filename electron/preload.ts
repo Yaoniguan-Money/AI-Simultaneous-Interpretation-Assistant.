@@ -12,9 +12,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showOverlay: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.OVERLAY_SHOW),
   /** 隐藏字幕悬浮窗 */
   hideOverlay: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.OVERLAY_HIDE),
-  /** 获取桌面捕获源 ID（供系统音频捕获使用） */
-  getDesktopSourceId: (): Promise<string | null> =>
-    ipcRenderer.invoke(IPC_CHANNELS.DESKTOP_GET_SOURCE_ID),
   /** 加密保存凭证到本地 */
   saveCredentials: (data: string): Promise<boolean> =>
     ipcRenderer.invoke(IPC_CHANNELS.CREDENTIALS_SAVE, data),

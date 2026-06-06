@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage, session } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -39,9 +39,27 @@ function createMainWindow(): void {
   }
 }
 
+/** 屏幕源缓存——应用启动时预取，供 setDisplayMediaRequestHandler 同步使用 */
+let cachedScreenSource: Electron.DesktopCapturerSource | null = null;
+
 /** 应用就绪后创建窗口并注册 IPC */
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createMainWindow();
+
+  /** 预取屏幕源——避免 handler 内异步延迟导致 getDisplayMedia 选择器不弹出 */
+  const sources = await desktopCapturer.getSources({ types: ['screen'] });
+  cachedScreenSource = sources.length > 0 ? sources[0] : null;
+
+  /**
+   * 系统音频捕获：注册屏幕捕获请求处理器
+   * 使用预取的屏幕源同步回调——确保 getDisplayMedia 选择器正常弹出
+   */
+  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+    callback({
+      video: cachedScreenSource,
+      audio: 'loopback',
+    });
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -71,13 +89,6 @@ ipcMain.handle(IPC_CHANNELS.OVERLAY_SHOW, () => {
 /** 隐藏字幕悬浮窗 */
 ipcMain.handle(IPC_CHANNELS.OVERLAY_HIDE, () => {
   hideOverlayWindow();
-});
-
-/** 获取桌面捕获源 ID——供渲染进程的系统音频捕获使用 */
-ipcMain.handle(IPC_CHANNELS.DESKTOP_GET_SOURCE_ID, async () => {
-  const sources = await desktopCapturer.getSources({ types: ['screen'] });
-  /** 返回第一个屏幕源 ID，渲染进程用此 ID 调用 getDisplayMedia */
-  return sources.length > 0 ? sources[0].id : null;
 });
 
 /** 凭证文件路径 */
