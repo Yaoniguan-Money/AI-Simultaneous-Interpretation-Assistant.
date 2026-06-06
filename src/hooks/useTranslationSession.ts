@@ -6,7 +6,7 @@ import type { LLMConfig } from '../services/llm/types';
 import { createLLMProvider } from '../services/llm/factory';
 import { FastChannelPipeline } from '../services/pipeline/channel1-fast';
 import { sharedContextAtom } from '../stores/shared-context';
-import { subtitleStackAtom } from '../stores/session-store';
+import { historyAtom, subtitleStackAtom } from '../stores/session-store';
 import type { SubtitleEntry } from '../types/subtitle';
 import { useAudioCapture } from './useAudioCapture';
 import type { AudioSource } from './useAudioCapture';
@@ -47,6 +47,8 @@ export function useTranslationSession(
 
   /** 字幕堆栈写入函数 —— 管线翻译结果写入此 atom */
   const setSubtitleStack = useSetAtom(subtitleStackAtom);
+  /** 历史记录写入函数 —— 完整句子追加，stop 时不清空 */
+  const setHistory = useSetAtom(historyAtom);
 
   const pipelineRef = useRef<FastChannelPipeline | null>(null);
   const audioCleanupRef = useRef<(() => void) | null>(null);
@@ -88,6 +90,7 @@ export function useTranslationSession(
         activeIdRef.current = id;
         const entry: SubtitleEntry = {
           id,
+          timestamp: Date.now(),
           original: '',
           translation: result.translation,
           isComplete: result.tokens.length === 0,
@@ -96,9 +99,17 @@ export function useTranslationSession(
         return [...prev, entry];
       });
 
-      /** 句子完成后重置活跃 ID */
+      /** 句子完成后重置活跃 ID 并追加到持久化历史 */
       if (result.tokens.length === 0) {
         activeIdRef.current = null;
+        setHistory((prev) => [...prev, {
+          id: idCounterRef.current,
+          timestamp: Date.now(),
+          original: '',
+          translation: result.translation,
+          isComplete: true,
+          correction: null,
+        }]);
       }
     });
 
