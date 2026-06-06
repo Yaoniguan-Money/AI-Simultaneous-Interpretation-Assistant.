@@ -67,6 +67,10 @@ export class IFlyTekASR implements ASRProvider {
 
   /** onmessage 写入的识别结果 FIFO 队列——recognize() 非阻塞取走，防止单槽覆盖导致结果丢失 */
   private resultQueue: ASRResult[] = [];
+
+  /** 从队列中分离出的 interim 结果暂存——供 drainInterimResults() 外部拉取 */
+  private pendingInterim: ASRResult[] = [];
+
   /** 连接进行中 Promise——防止并发 processChunk 触发多个并行 connect() 产生孤儿 WebSocket */
   private connectingPromise: Promise<void> | null = null;
 
@@ -79,8 +83,8 @@ export class IFlyTekASR implements ASRProvider {
 
   /**
    * 发送一段 PCM 音频数据进行识别——非阻塞模式
-   * RTASR 是流式协议：发送与接收独立。采用「发送即忘 + 拉取缓存结果」模式，
-   * 解除 processChunk 处理锁期间音频大量丢弃的问题（详见 CLAUDE.md A.4 流处理原则）
+   * RTASR 是流式协议：发送与接收独立。采用「发送即忘 + 拉取队列缓存」模式，
+   * 队列化解决单槽覆盖丢失问题。
    * 音频格式要求：16kHz / 16bit / 单声道 / PCM 原始数据
    */
   async recognize(audio: Uint8Array): Promise<ASRResult> {
@@ -100,11 +104,47 @@ export class IFlyTekASR implements ASRProvider {
       return this.emptyResult(true);
     }
 
-    /** 拉取 onmessage 缓存的 FIFO 队列——无结果时返回空，不阻塞调用方 */
-    if (this.resultQueue.length > 0) {
-      return this.resultQueue.shift()!;
+    /** 消费队列：分离 interim 与 final，返回最终结果 */
+    return this.consumeQueue();
+  }
+
+  /**
+   * 拉取本次 recognize() 调用期间累积的所有 interim 结果
+   * 供 FastChannelPipeline 分发给字幕 UI 展示实时识别文本
+   * 注意：此方法不在 ASRProvider 接口中——由 pipeline 可选调用
+   */
+  drainInterimResults(): ASRResult[] {
+    const arr = this.pendingInterim;
+    this.pendingInterim = [];
+    return arr;
+  }
+
+  // ---- 私有方法 ----
+
+  /**
+   * 消费结果队列：分离 interim 与 final，返回最适合的识别结果
+   * 优先返回最新 final 结果（供分句器），无 final 时返回最新 interim（供 UI 展示）
+   * interim 暂存到 pendingInterim，调用方可通过 drainInterimResults() 单独拉取
+   */
+  private consumeQueue(): ASRResult {
+    let latestInterim: ASRResult | null = null;
+    let latestFinal: ASRResult | null = null;
+
+    while (this.resultQueue.length > 0) {
+      const r = this.resultQueue.shift()!;
+      if (r.isFinal && r.text) {
+        latestFinal = r;
+      } else if (r.text) {
+        latestInterim = r;
+      }
     }
-    return this.emptyResult(false);
+
+    /** interim 暂存供外部 drainInterimResults() 拉取 */
+    if (latestInterim) {
+      this.pendingInterim.push(latestInterim);
+    }
+
+    return latestFinal ?? latestInterim ?? this.emptyResult(false);
   }
 
   dispose(): void {
@@ -119,6 +159,7 @@ export class IFlyTekASR implements ASRProvider {
     this.ws = null;
     this.config = null;
     this.resultQueue = [];
+    this.pendingInterim = [];
   }
 
   /**
@@ -153,6 +194,7 @@ export class IFlyTekASR implements ASRProvider {
       const url = await buildAuthUrl(cfg);
       this.ws = new WebSocket(url);
       this.resultQueue = [];
+      this.pendingInterim = [];
       let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
       /** 阶段 ①：等待 WebSocket 连接建立 */
@@ -174,7 +216,7 @@ export class IFlyTekASR implements ASRProvider {
       /** 阶段 ②：等待 RTASR 握手确认 */
       await this.awaitHandshake();
 
-      /** 阶段 ③：注册结果处理器——非阻塞模式，结果统一写入 resultQueue 供 recognize() 拉取 */
+      /** 阶段 ③：注册结果处理器——结果追加到队列，recognize() 消费时批量取出 */
       this.ws.onmessage = (event: MessageEvent) => {
         try {
           const msg = JSON.parse(event.data as string) as RTASRWsMessage;
@@ -193,9 +235,10 @@ export class IFlyTekASR implements ASRProvider {
         } catch { /* JSON 解析失败，忽略本条消息 */ }
       };
 
-      /** 服务端主动关闭——下次 recognize() 调用时自动重连 */
+      /** 服务端主动关闭——清空队列，下次 recognize() 调用时自动重连 */
       this.ws.onclose = () => {
         this.resultQueue = [];
+        this.pendingInterim = [];
       };
     })();
 
@@ -274,10 +317,12 @@ async function buildAuthUrl(cfg: ASRConfig): Promise<string> {
   const ts = Math.floor(Date.now() / 1000).toString();
   const lang = cfg.language ?? PROTOCOL.DEFAULT_LANG;
 
+  /** 优先使用配置 endpoint，未提供时回退到默认 WSS_URL */
+  const baseUrl = cfg.endpoint ?? PROTOCOL.WSS_URL;
   const md5Str = md5Hex(appId + ts);
   const signa = await hmacSha1Base64(md5Str, apiKey);
 
-  return `${PROTOCOL.WSS_URL}?appid=${encodeURIComponent(appId)}&ts=${ts}&signa=${encodeURIComponent(signa)}&lang=${encodeURIComponent(lang)}`;
+  return `${baseUrl}?appid=${encodeURIComponent(appId)}&ts=${ts}&signa=${encodeURIComponent(signa)}&lang=${encodeURIComponent(lang)}`;
 }
 
 /**
@@ -373,6 +418,27 @@ async function hmacSha1Base64(message: string, secret: string): Promise<string> 
 // ---- 识别结果解析 ----
 
 /**
+ * 从 RTASR 词信息列表中提取平均置信度
+ * wp（word probability）为每个词的置信度浮点字符串，缺失时回退到 1.0
+ */
+/** wp 为每词置信度浮点字符串，取平均值；缺失或解析失败回退到 1.0 */
+function extractConfidence(ws: Array<{ cw?: Array<{ wp?: string }> }> | undefined): number {
+  let total = 0;
+  let count = 0;
+  for (const w of ws ?? []) {
+    const wp = w.cw?.[0]?.wp;
+    if (wp) {
+      const parsed = parseFloat(wp);
+      if (!isNaN(parsed)) {
+        total += parsed;
+        count++;
+      }
+    }
+  }
+  return count > 0 ? total / count : 1.0;
+}
+
+/**
  * 解析 RTASR 服务端返回的识别结果
  * msg.data 是 JSON 字符串，需二次解析
  * 文本提取路径：cn.st.rt[0].ws[].cw[].w 逐词拼接
@@ -398,7 +464,7 @@ function extractRTASRResult(rawData: string): ASRResult | null {
     return {
       text,
       isFinal,
-      confidence: 1.0,
+      confidence: extractConfidence(st.rt[0].ws),
       startTime: st.bg ? Number(st.bg) : 0,
       endTime: st.ed ? Number(st.ed) : 0,
     };

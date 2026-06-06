@@ -16,16 +16,22 @@ export interface AudioCaptureConfig {
 const DEFAULTS = {
   SAMPLE_RATE: 16000,
   CHANNELS: 1,
-  /** ScriptProcessor 缓冲区帧数 */
-  BUFFER_SIZE: 4096,
+  /** ScriptProcessor 缓冲区帧数——2048 帧 @ 16kHz ≈ 128ms，降低捕获延迟 */
+  BUFFER_SIZE: 2048,
   /** 16-bit PCM 最大值 */
   PCM16_MAX: 32767,
+  /** AudioContext 延迟策略——interactive 优先低延迟而非省电，适合实时 ASR */
+  LATENCY_HINT: 'interactive' as AudioContextLatencyCategory,
   /** 静音超时阈值（毫秒），超过此时间无有效音频输入则上报错误 */
   SILENT_TIMEOUT_MS: 5000,
   /** 静音检测检查间隔（毫秒） */
   SILENT_CHECK_INTERVAL: 1000,
   /** 有效音频阈值——采样振幅超过此值的缓冲区视为有音频输入（0.05% 满幅） */
   AUDIO_LEVEL_THRESHOLD: 0.0005,
+  /** 禁用浏览器音频后处理——获取原始音频供 ASR，减少处理延迟 */
+  ECHO_CANCELLATION: false,
+  NOISE_SUPPRESSION: false,
+  AUTO_GAIN_CONTROL: false,
 } as const;
 
 /** Hook 返回值 */
@@ -99,7 +105,14 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { sampleRate, channelCount: cfg.channels ?? DEFAULTS.CHANNELS },
+      audio: {
+        sampleRate,
+        channelCount: cfg.channels ?? DEFAULTS.CHANNELS,
+        /** 禁用浏览器后处理以获取原始音频——回声消除/降噪/自动增益会增加延迟并降低 ASR 准确率 */
+        echoCancellation: DEFAULTS.ECHO_CANCELLATION,
+        noiseSuppression: DEFAULTS.NOISE_SUPPRESSION,
+        autoGainControl: DEFAULTS.AUTO_GAIN_CONTROL,
+      },
     });
     await processStream(stream, sampleRate);
   }, [stop]);
@@ -125,7 +138,12 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
      * video: 4×4×1fps 最小规格，避免 GPU 纹理包装错误
      */
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      audio: true,
+      /** 系统音频回路通常无后处理，显式声明与麦克风约束一致 */
+      audio: {
+        echoCancellation: DEFAULTS.ECHO_CANCELLATION,
+        noiseSuppression: DEFAULTS.NOISE_SUPPRESSION,
+        autoGainControl: DEFAULTS.AUTO_GAIN_CONTROL,
+      },
       video: { width: 4, height: 4, frameRate: 1 },
     });
 
@@ -153,7 +171,8 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
       };
     }
 
-    const audioCtx = new AudioContext({ sampleRate });
+    /** latencyHint: interactive 让浏览器优先降低延迟——桌面端 Electron 无省电限制，效果最佳 */
+    const audioCtx = new AudioContext({ sampleRate, latencyHint: DEFAULTS.LATENCY_HINT });
     /** 确保 AudioContext 处于运行状态——getDisplayMedia 弹出系统对话框会断裂 user gesture 链，
      *  导致 Chromium autoplay policy 将 AudioContext 初始化为 suspended，onaudioprocess 不触发 */
     if (audioCtx.state === 'suspended') {
@@ -242,16 +261,25 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
 }
 
 /**
+ * PCM 转换缓冲区缓存——避免每次 onaudioprocess 分配新 Int16Array
+ * BufferSize 在运行期间固定（2048 @ 16kHz），长度不变时重用同一块内存
+ */
+let pcmBufferCache: Int16Array | null = null;
+
+/**
  * Float32Array（范围 -1.0 ~ 1.0）转 Int16Array（范围 -32768 ~ 32767）
  * 方案 4.3 要求输出 16-bit PCM
  */
 /** Float32Array → Int16Array，公共工具函数 */
 export function float32ToInt16(float32: Float32Array): Int16Array {
   const len = float32.length;
-  const int16 = new Int16Array(len);
+  /** 缓存命中且长度匹配时重用，否则重新分配 */
+  if (!pcmBufferCache || pcmBufferCache.length !== len) {
+    pcmBufferCache = new Int16Array(len);
+  }
   for (let i = 0; i < len; i++) {
     const s = Math.max(-1, Math.min(1, float32[i]));
-    int16[i] = s < 0 ? s * DEFAULTS.PCM16_MAX : s * (DEFAULTS.PCM16_MAX - 1);
+    pcmBufferCache[i] = s < 0 ? s * DEFAULTS.PCM16_MAX : s * (DEFAULTS.PCM16_MAX - 1);
   }
-  return int16;
+  return pcmBufferCache;
 }
