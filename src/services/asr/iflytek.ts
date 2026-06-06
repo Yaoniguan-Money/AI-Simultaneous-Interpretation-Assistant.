@@ -65,8 +65,10 @@ export class IFlyTekASR implements ASRProvider {
   private ws: WebSocket | null = null;
   private config: ASRConfig | null = null;
 
-  /** onmessage 写入的下一个待消费结果——recognize() 非阻塞取走，解耦发送与接收 */
-  private queuedResult: ASRResult | null = null;
+  /** onmessage 写入的识别结果 FIFO 队列——recognize() 非阻塞取走，防止单槽覆盖导致结果丢失 */
+  private resultQueue: ASRResult[] = [];
+  /** 连接进行中 Promise——防止并发 processChunk 触发多个并行 connect() 产生孤儿 WebSocket */
+  private connectingPromise: Promise<void> | null = null;
 
   // ---- 公共接口 ----
 
@@ -98,11 +100,9 @@ export class IFlyTekASR implements ASRProvider {
       return this.emptyResult(true);
     }
 
-    /** 拉取 onmessage 缓存的结果——无结果时返回空，不阻塞调用方 */
-    if (this.queuedResult) {
-      const r = this.queuedResult;
-      this.queuedResult = null;
-      return r;
+    /** 拉取 onmessage 缓存的 FIFO 队列——无结果时返回空，不阻塞调用方 */
+    if (this.resultQueue.length > 0) {
+      return this.resultQueue.shift()!;
     }
     return this.emptyResult(false);
   }
@@ -118,7 +118,7 @@ export class IFlyTekASR implements ASRProvider {
     }
     this.ws = null;
     this.config = null;
-    this.queuedResult = null;
+    this.resultQueue = [];
   }
 
   /**
@@ -144,53 +144,66 @@ export class IFlyTekASR implements ASRProvider {
    * 分两阶段：①等待 WebSocket open + ②等待服务端 started 确认
    */
   private async connect(cfg: ASRConfig): Promise<void> {
-    const url = await buildAuthUrl(cfg);
-    this.ws = new WebSocket(url);
-    this.queuedResult = null;
-    let connectTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 连接锁：已有进行中的连接则复用其 Promise，避免并发 processChunk 产生孤儿 WebSocket */
+    if (this.connectingPromise) {
+      return this.connectingPromise;
+    }
 
-    /** 阶段 ①：等待 WebSocket 连接建立 */
-    await new Promise<void>((resolve, reject) => {
-      this.ws!.onopen = () => {
-        if (connectTimer) clearTimeout(connectTimer);
-        resolve();
-      };
-      this.ws!.onerror = () => {
-        if (connectTimer) clearTimeout(connectTimer);
-        reject(new Error('WebSocket 连接失败'));
-      };
-      connectTimer = setTimeout(
-        () => reject(new Error('WebSocket 连接超时')),
-        PROTOCOL.CONNECT_TIMEOUT,
-      );
-    });
+    this.connectingPromise = (async (): Promise<void> => {
+      const url = await buildAuthUrl(cfg);
+      this.ws = new WebSocket(url);
+      this.resultQueue = [];
+      let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    /** 阶段 ②：等待 RTASR 握手确认 */
-    await this.awaitHandshake();
+      /** 阶段 ①：等待 WebSocket 连接建立 */
+      await new Promise<void>((resolve, reject) => {
+        this.ws!.onopen = () => {
+          if (connectTimer) clearTimeout(connectTimer);
+          resolve();
+        };
+        this.ws!.onerror = () => {
+          if (connectTimer) clearTimeout(connectTimer);
+          reject(new Error('WebSocket 连接失败'));
+        };
+        connectTimer = setTimeout(
+          () => reject(new Error('WebSocket 连接超时')),
+          PROTOCOL.CONNECT_TIMEOUT,
+        );
+      });
 
-    /** 阶段 ③：注册结果处理器——非阻塞模式，结果统一写入 queuedResult 供 recognize() 拉取 */
-    this.ws.onmessage = (event: MessageEvent) => {
-      try {
-        const msg = JSON.parse(event.data as string) as RTASRWsMessage;
+      /** 阶段 ②：等待 RTASR 握手确认 */
+      await this.awaitHandshake();
 
-        if (msg.action === 'error') {
-          console.error(`[RTASR] 服务端错误: ${msg.desc} (code: ${msg.code})`);
-          return;
-        }
+      /** 阶段 ③：注册结果处理器——非阻塞模式，结果统一写入 resultQueue 供 recognize() 拉取 */
+      this.ws.onmessage = (event: MessageEvent) => {
+        try {
+          const msg = JSON.parse(event.data as string) as RTASRWsMessage;
 
-        if (msg.action === 'result' && msg.data) {
-          const result = extractRTASRResult(msg.data);
-          if (result) {
-            this.queuedResult = result;
+          if (msg.action === 'error') {
+            console.error(`[RTASR] 服务端错误: ${msg.desc} (code: ${msg.code})`);
+            return;
           }
-        }
-      } catch { /* JSON 解析失败，忽略本条消息 */ }
-    };
 
-    /** 服务端主动关闭——下次 recognize() 调用时自动重连 */
-    this.ws.onclose = () => {
-      this.queuedResult = null;
-    };
+          if (msg.action === 'result' && msg.data) {
+            const result = extractRTASRResult(msg.data);
+            if (result) {
+              this.resultQueue.push(result);
+            }
+          }
+        } catch { /* JSON 解析失败，忽略本条消息 */ }
+      };
+
+      /** 服务端主动关闭——下次 recognize() 调用时自动重连 */
+      this.ws.onclose = () => {
+        this.resultQueue = [];
+      };
+    })();
+
+    try {
+      await this.connectingPromise;
+    } finally {
+      this.connectingPromise = null;
+    }
   }
 
   /**
