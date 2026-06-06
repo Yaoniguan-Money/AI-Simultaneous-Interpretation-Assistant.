@@ -50,7 +50,7 @@ export function ApiKeyInput({ label, value, onChange, placeholder }: ApiKeyInput
           className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-text-muted
                      hover:text-text-primary transition-colors"
         >
-          {visible ? 'Hide' : 'Show'}
+          {visible ? '隐藏' : '显示'}
         </button>
       </div>
     </div>

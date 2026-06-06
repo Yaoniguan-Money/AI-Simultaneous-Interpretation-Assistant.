@@ -15,13 +15,13 @@ export function HistoryPanel({ onBack }: { onBack: () => void }): JSX.Element {
         onClick={onBack}
         className="text-xs text-text-muted hover:text-text-primary transition-colors mb-4"
       >
-        Back
+        返回
       </button>
 
       {history.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
           <p className="text-sm text-text-muted">
-            No translation history yet. Start translating to see entries here.
+            暂无翻译记录，开始翻译后此处将显示历史
           </p>
         </div>
       ) : (
@@ -56,14 +56,14 @@ export function HistoryPanel({ onBack }: { onBack: () => void }): JSX.Element {
               className="flex-1 py-2.5 rounded-btn border border-border bg-surface
                          text-xs font-medium hover:bg-surface-hover transition-colors"
             >
-              Copy All
+              复制全部
             </button>
             <button
               onClick={() => exportMarkdown(history)}
               className="flex-1 py-2.5 rounded-btn bg-black text-white
                          text-xs font-medium hover:bg-[#333] transition-colors"
             >
-              Export Markdown
+              导出 Markdown
             </button>
           </div>
         </>

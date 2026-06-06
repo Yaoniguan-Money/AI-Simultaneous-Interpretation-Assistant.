@@ -121,14 +121,18 @@ export class DeepSeekLLM implements LLMProvider {
     this.config = null;
   }
 
+  /**
+   * 验证凭证有效性
+   * 向 API 端点发送最短测试请求（max_tokens=1），
+   * 通过响应状态码判定凭证是否有效：401/403 → 无效，其他非 ok → 网络异常
+   */
   async validateCredentials(config: LLMConfig): Promise<boolean> {
     try {
-      const tempLLM = new DeepSeekLLM();
-      await tempLLM.configure(config);
+      /** configure() 内部校验 config.credentials.apiKey 是否存在 */
+      await this.configure(config);
       const endpoint = config.endpoint ?? PROTOCOL.ENDPOINT;
       const model = config.model ?? PROTOCOL.MODEL;
 
-      /** 发送简短测试请求验证 API Key 有效性 */
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: this.buildHeaders(config),
@@ -140,7 +144,6 @@ export class DeepSeekLLM implements LLMProvider {
         }),
       });
 
-      tempLLM.dispose();
       if (response.status === 401 || response.status === 403) return false;
       return response.ok;
     } catch {
