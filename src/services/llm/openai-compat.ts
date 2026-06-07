@@ -12,33 +12,31 @@ import type {
 import { ensureConfigured } from '../provider-utils';
 
 /**
- * DeepSeek API 协议常量
+ * OpenAI 兼容 API 共享协议常量
+ * 适用于所有使用 /v1/chat/completions + Bearer Token + SSE 流式的供应商
+ * DeepSeek、Qwen、Zhipu 均遵循此协议
  */
 const PROTOCOL = {
-  /** 默认端点 */
-  ENDPOINT: 'https://api.deepseek.com/v1/chat/completions',
-  /** 默认模型 */
-  MODEL: 'deepseek-chat',
   /** 默认最大输出 token 数 */
   MAX_TOKENS: 1024,
   /** 翻译默认温度 */
   TRANSLATE_TEMPERATURE: 0.3,
   /** 分析默认温度 */
   ANALYZE_TEMPERATURE: 0.1,
-  /** 翻译系统提示词模板 */
-  TRANSLATE_SYSTEM_PROMPT: buildTranslatePrompt(),
-  /** 分析系统提示词模板 */
-  ANALYZE_SYSTEM_PROMPT: buildAnalyzePrompt(),
-  /** 会议纪要系统提示词模板 */
-  MINUTES_SYSTEM_PROMPT: buildMinutesPrompt(),
-  /** 会议纪要默认温度——比翻译略高以保证内容多样性 */
+  /** 会议纪要默认温度 */
   MINUTES_TEMPERATURE: 0.3,
-  /** 会议纪要输入文本最大字符数，超出则采样截断 */
+  /** 会议纪要输入文本最大字符数 */
   MINUTES_MAX_INPUT_CHARS: 6000,
   /** 会议纪要截断时首部保留句数 */
   MINUTES_HEAD_COUNT: 2,
   /** 会议纪要截断时尾部保留句数 */
   MINUTES_TAIL_COUNT: 8,
+  /** 翻译系统提示词 */
+  TRANSLATE_SYSTEM_PROMPT: buildTranslatePrompt(),
+  /** 分析系统提示词 */
+  ANALYZE_SYSTEM_PROMPT: buildAnalyzePrompt(),
+  /** 会议纪要系统提示词 */
+  MINUTES_SYSTEM_PROMPT: buildMinutesPrompt(),
 } as const;
 
 /** 凭证字段名 */
@@ -50,15 +48,19 @@ interface StreamChunk {
 }
 
 /**
- * DeepSeek V4 Flash（OpenAI 兼容）LLM 实现
- * 通过 HTTPS SSE 流式接口实现翻译和分析
+ * OpenAI 兼容 LLM 通用实现
+ *
+ * 覆盖 DeepSeek、Qwen（通义千问）、Zhipu（智谱 GLM）和自定义 OpenAI 兼容 API。
+ * 所有供应商使用相同的 HTTPS SSE 流式协议，仅在默认端点和默认模型上有差异。
+ * 工厂函数负责根据 provider 类型注入不同的默认值。
+ *
+ * 功能：流式翻译、上下文分析、会议纪要生成、凭证验证。
  */
-export class DeepSeekLLM implements LLMProvider {
-  readonly name = 'deepseek';
+export class OpenAICompatLLM implements LLMProvider {
+  readonly name: string;
 
   /**
    * LLM 常见拒绝/占位响应模式——这些不是有效翻译，必须丢弃
-   * 当 LLM 收到空输入或无法理解的文本时可能返回此类响应
    */
   private static readonly REJECTION_PATTERNS: ReadonlySet<string> = new Set([
     '请提供需要翻译的英语',
@@ -76,6 +78,19 @@ export class DeepSeekLLM implements LLMProvider {
   private config: LLMConfig | null = null;
   private abortController: AbortController | null = null;
 
+  /**
+   * @param providerName 供应商名称（如 'deepseek'、'qwen'），用于日志和错误提示
+   * @param defaultEndpoint 默认 API 端点，可通过 LLMConfig.endpoint 覆盖
+   * @param defaultModel 默认模型名，可通过 LLMConfig.model 覆盖
+   */
+  constructor(
+    providerName: string,
+    private defaultEndpoint: string,
+    private defaultModel: string,
+  ) {
+    this.name = providerName;
+  }
+
   async configure(config: LLMConfig): Promise<void> {
     this.validateConfig(config);
     this.config = { ...config };
@@ -83,7 +98,7 @@ export class DeepSeekLLM implements LLMProvider {
 
   /** 流式翻译——通过 SSE 逐 token 产出结果 */
   async *translate(request: TranslationRequest): AsyncGenerator<TranslationResult> {
-    const cfg = ensureConfigured(this.config, 'DeepSeek LLM');
+    const cfg = ensureConfigured(this.config, `${this.name} LLM`);
     if (!request.text || request.text.trim().length === 0) {
       yield { translation: '', corrections: [], tokens: [] };
       return;
@@ -97,7 +112,7 @@ export class DeepSeekLLM implements LLMProvider {
       await this.handleHttpError(response);
     }
     if (!response.body) {
-      throw new Error('DeepSeek API 未返回流式响应体');
+      throw new Error(`${this.name} API 未返回流式响应体`);
     }
 
     yield* this.readSSEStream(response.body.getReader());
@@ -105,9 +120,9 @@ export class DeepSeekLLM implements LLMProvider {
 
   /** 上下文分析：领域检测、术语提取、摘要生成 */
   async analyze(sentences: string[], history: string[]): Promise<AnalysisResult> {
-    const cfg = ensureConfigured(this.config, 'DeepSeek LLM');
-    const endpoint = cfg.endpoint ?? PROTOCOL.ENDPOINT;
-    const model = cfg.model ?? PROTOCOL.MODEL;
+    const cfg = ensureConfigured(this.config, `${this.name} LLM`);
+    const endpoint = cfg.endpoint ?? this.defaultEndpoint;
+    const model = cfg.model ?? this.defaultModel;
     const temperature = cfg.temperature ?? PROTOCOL.ANALYZE_TEMPERATURE;
 
     const content = [
@@ -144,24 +159,18 @@ export class DeepSeekLLM implements LLMProvider {
     return await this.parseAnalysisResponse(response);
   }
 
-  /**
-   * 根据完整翻译历史生成结构化会议纪要
-   * @param history 翻译历史记录（原文+译文对）
-   * @param durationSeconds 会议持续秒数，由调用方计算
-   * @returns 结构化会议纪要，失败时返回各字段为空的默认值
-   */
+  /** 根据完整翻译历史生成结构化会议纪要 */
   async generateMinutes(
     history: TranslatedSentence[],
     durationSeconds: number,
   ): Promise<MeetingMinutes> {
-    const cfg = ensureConfigured(this.config, 'DeepSeek LLM');
-    /** 空历史无内容可总结——调用方应在调用前自行检查 */
+    const cfg = ensureConfigured(this.config, `${this.name} LLM`);
     if (!history || history.length === 0) {
       throw new Error('翻译历史为空，无法生成会议纪要');
     }
 
-    const endpoint = cfg.endpoint ?? PROTOCOL.ENDPOINT;
-    const model = cfg.model ?? PROTOCOL.MODEL;
+    const endpoint = cfg.endpoint ?? this.defaultEndpoint;
+    const model = cfg.model ?? this.defaultModel;
     const temperature = cfg.temperature ?? PROTOCOL.MINUTES_TEMPERATURE;
 
     const userContent = this.buildMinutesUserPrompt(history, durationSeconds);
@@ -194,17 +203,12 @@ export class DeepSeekLLM implements LLMProvider {
     this.config = null;
   }
 
-  /**
-   * 验证凭证有效性
-   * 向 API 端点发送最短测试请求（max_tokens=1），
-   * 通过响应状态码判定凭证是否有效：401/403 → 无效，其他非 ok → 网络异常
-   */
+  /** 验证凭证有效性：发送最短测试请求，401/403→无效 */
   async validateCredentials(config: LLMConfig): Promise<boolean> {
     try {
-      /** configure() 内部校验 config.credentials.apiKey 是否存在 */
       await this.configure(config);
-      const endpoint = config.endpoint ?? PROTOCOL.ENDPOINT;
-      const model = config.model ?? PROTOCOL.MODEL;
+      const endpoint = config.endpoint ?? this.defaultEndpoint;
+      const model = config.model ?? this.defaultModel;
 
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -226,14 +230,13 @@ export class DeepSeekLLM implements LLMProvider {
 
   // ---- 请求构建 ----
 
-  /** 构造并发送翻译 HTTP 请求 */
   private async sendTranslateRequest(
     cfg: LLMConfig,
     request: TranslationRequest,
     signal: AbortSignal,
   ): Promise<Response> {
-    const endpoint = cfg.endpoint ?? PROTOCOL.ENDPOINT;
-    const model = cfg.model ?? PROTOCOL.MODEL;
+    const endpoint = cfg.endpoint ?? this.defaultEndpoint;
+    const model = cfg.model ?? this.defaultModel;
     const temperature = cfg.temperature ?? PROTOCOL.TRANSLATE_TEMPERATURE;
     const maxTokens = cfg.maxTokens ?? PROTOCOL.MAX_TOKENS;
 
@@ -251,7 +254,6 @@ export class DeepSeekLLM implements LLMProvider {
     });
   }
 
-  /** 逐行读取 SSE 流，累积翻译文本并逐 token yield */
   private async *readSSEStream(
     reader: ReadableStreamDefaultReader<Uint8Array>,
   ): AsyncGenerator<TranslationResult> {
@@ -281,7 +283,6 @@ export class DeepSeekLLM implements LLMProvider {
           tokens.push({ text: char, index: tokenIndex++ });
         }
         fullText += content;
-        /** 中间帧也做清洗——避免思考文字在流式字幕中逐字出现 */
         const sanitized = this.sanitizeTranslation(fullText);
         if (sanitized) {
           yield { translation: sanitized, corrections: [], tokens };
@@ -289,12 +290,10 @@ export class DeepSeekLLM implements LLMProvider {
       }
     }
 
-    /** 流结束后尝试提取修正 */
     const corrections = this.extractCorrections(fullText);
     yield { translation: this.cleanOutput(fullText), corrections, tokens: [] };
   }
 
-  /** 构建 Bearer Token 鉴权请求头 */
   private buildHeaders(cfg: LLMConfig): Record<string, string> {
     return {
       'Content-Type': 'application/json',
@@ -302,11 +301,9 @@ export class DeepSeekLLM implements LLMProvider {
     };
   }
 
-  /** 构建翻译系统提示词，注入领域和术语上下文 */
   private buildTranslationSystemPrompt(request: TranslationRequest): string {
     const parts = [PROTOCOL.TRANSLATE_SYSTEM_PROMPT];
 
-    /** 注入 Channel 2 提供的领域和术语 */
     const ctx = request.context;
     if (ctx.domain) {
       parts.push(`【当前领域】${ctx.domain} (置信度: ${ctx.domainConfidence})`);
@@ -318,7 +315,6 @@ export class DeepSeekLLM implements LLMProvider {
       parts.push(`【术语映射】${terms}`);
     }
 
-    /** 注入前文翻译历史，用于修正检测 */
     if (request.previousSentences.length > 0) {
       parts.push('【前文翻译记录】');
       for (const s of request.previousSentences) {
@@ -332,7 +328,6 @@ export class DeepSeekLLM implements LLMProvider {
 
   // ---- 响应解析 ----
 
-  /** 从 SSE chunk 中提取内容片段 */
   private parseStreamChunk(data: string): string | null {
     try {
       const parsed = JSON.parse(data) as StreamChunk;
@@ -342,7 +337,6 @@ export class DeepSeekLLM implements LLMProvider {
     }
   }
 
-  /** 从 AI 完整输出中提取修正标记 */
   private extractCorrections(raw: string): Correction[] {
     const match = raw.match(/【修正】([\s\S]+)$/);
     if (!match) return [];
@@ -366,22 +360,18 @@ export class DeepSeekLLM implements LLMProvider {
   }
 
   /**
-   * 清理 LLM 输出中可能混入的思考过程/分析文字
-   * 防御层——主要依赖系统提示词的"只输出翻译"指令来防止，
-   * 此方法通过中文字符占比过滤 + 拒绝模式检测 + 前缀裁剪作为兜底
+   * 清理 LLM 输出中的思考文字/分析过程
+   * 通过中文字符占比过滤 + 拒绝模式检测 + 前缀裁剪作为防御
    */
   private sanitizeTranslation(text: string): string {
     if (!text) return text;
 
-    /** 统计 CJK 字符占比，低于阈值视为思考文字 */
     const cjkCount = (text.match(/[一-鿿㐀-䶿]/g) || []).length;
     const totalChars = text.replace(/\s/g, '').length;
     if (totalChars === 0 || cjkCount / totalChars < 0.1) return '';
 
-    /** 检测 LLM 拒绝/占位响应——命中已知模式则丢弃 */
-    if (DeepSeekLLM.isRejectionResponse(text)) return '';
+    if (OpenAICompatLLM.isRejectionResponse(text)) return '';
 
-    /** 裁剪第一个中文字符前的思考前缀 */
     const firstCjk = text.search(/[一-鿿]/);
     if (firstCjk > 0) {
       return text.slice(firstCjk).trim();
@@ -389,22 +379,19 @@ export class DeepSeekLLM implements LLMProvider {
     return text.trim();
   }
 
-  /** 检测文本是否命中 LLM 拒绝/占位响应模式 */
   private static isRejectionResponse(text: string): boolean {
-    for (const pattern of DeepSeekLLM.REJECTION_PATTERNS) {
+    for (const pattern of OpenAICompatLLM.REJECTION_PATTERNS) {
       if (text.includes(pattern)) return true;
     }
     return false;
   }
 
-  /** 去除修正标记并清理思考文字后的纯净译文 */
   private cleanOutput(raw: string): string {
     return this.sanitizeTranslation(
       raw.replace(/【修正】[\s\S]+$/, ''),
     );
   }
 
-  /** 解析分析 API 的 JSON 响应 */
   private async parseAnalysisResponse(response: Response): Promise<AnalysisResult> {
     const json = (await response.json()) as {
       choices?: { message?: { content?: string } }[];
@@ -433,28 +420,21 @@ export class DeepSeekLLM implements LLMProvider {
     }
   }
 
-  // ---- 工具 ----
-
   private validateConfig(config: LLMConfig): void {
     if (!config.credentials[CRED_KEY.apiKey]) {
-      throw new Error('DeepSeek LLM 缺少 apiKey');
+      throw new Error(`${this.name} LLM 缺少 apiKey`);
     }
   }
 
-  /** HTTP 错误统一处理，401/403 给出明确提示 */
   private async handleHttpError(response: Response): Promise<never> {
     if (response.status === 401 || response.status === 403) {
       throw new Error('API Key 无效或已过期，请更新密钥');
     }
-    throw new Error(`DeepSeek API HTTP ${response.status}: ${response.statusText}`);
+    throw new Error(`${this.name} API HTTP ${response.status}: ${response.statusText}`);
   }
 
   // ---- 会议纪要辅助 ----
 
-  /**
-   * 构造会议纪要生成的 user prompt
-   * 拼接翻译历史并附加结构化输出要求
-   */
   private buildMinutesUserPrompt(
     history: TranslatedSentence[],
     durationSeconds: number,
@@ -484,10 +464,6 @@ export class DeepSeekLLM implements LLMProvider {
     ].join('\n');
   }
 
-  /**
-   * 截断过长的翻译历史，防止超出 LLM 上下文窗口
-   * 策略：首部保留少量（上下文锚点）+ 尾部保留最多（近因优先）
-   */
   private truncateHistory(history: TranslatedSentence[]): TranslatedSentence[] {
     const maxChars = PROTOCOL.MINUTES_MAX_INPUT_CHARS;
     const totalChars = history.reduce(
@@ -498,15 +474,11 @@ export class DeepSeekLLM implements LLMProvider {
 
     const head = history.slice(0, PROTOCOL.MINUTES_HEAD_COUNT);
     const tail = history.slice(-PROTOCOL.MINUTES_TAIL_COUNT);
-    /** 确保首尾不重叠（总句数不足时退化为全量） */
     if (head.length + tail.length >= history.length) return history;
     return [...head, ...tail];
   }
 
-  /** 解析会议纪要 API 的 JSON 响应，失败时返回空纪要 */
-  private async parseMinutesResponse(
-    response: Response,
-  ): Promise<MeetingMinutes> {
+  private async parseMinutesResponse(response: Response): Promise<MeetingMinutes> {
     const json = (await response.json()) as {
       choices?: { message?: { content?: string } }[];
     };
@@ -536,7 +508,8 @@ export class DeepSeekLLM implements LLMProvider {
   }
 }
 
-/** 翻译系统提示词 */
+// ---- 系统提示词（供应商无关，中文通用） ----
+
 function buildTranslatePrompt(): string {
   return [
     '你是一个专业的英译中同声传译助手。请将以下英语句子翻译为流畅、自然的中文。',
@@ -549,7 +522,6 @@ function buildTranslatePrompt(): string {
   ].join('\n');
 }
 
-/** 分析系统提示词 */
 function buildAnalyzePrompt(): string {
   return [
     '你是一个会议内容分析助手。请分析提供的会议内容，以 JSON 格式返回：',
@@ -562,7 +534,6 @@ function buildAnalyzePrompt(): string {
   ].join('\n');
 }
 
-/** 会议纪要生成系统提示词 */
 function buildMinutesPrompt(): string {
   return [
     '你是一个专业的会议记录员。你的任务是根据英文会议的翻译记录，生成结构化的中文会议纪要。',

@@ -1,5 +1,8 @@
 import type { ASRConfig, ASRProvider } from './types';
 import { IFlyTekASR } from './iflytek';
+import { AliyunASR } from './aliyun';
+import { DeepgramASR } from './deepgram';
+import { CustomASR } from './custom';
 
 /**
  * ASR 供应商工厂函数
@@ -10,8 +13,12 @@ export function createASRProvider(config: ASRConfig): ASRProvider {
   switch (config.provider) {
     case 'iflytek':
       return new IFlyTekASR();
-    // 后续 PR 扩展：case 'aliyun': return new AliyunASR();
-    // 后续 PR 扩展：case 'custom': return new CustomASR();
+    case 'aliyun':
+      return new AliyunASR();
+    case 'deepgram':
+      return new DeepgramASR();
+    case 'custom':
+      return new CustomASR();
     default:
       throw new Error(`不支持的 ASR 供应商: ${config.provider}`);
   }
