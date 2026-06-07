@@ -14,13 +14,16 @@ const projectRoot = join(__dirname, '..');
 const releaseDir = join(projectRoot, 'release');
 const unpackedDir = join(releaseDir, 'win-unpacked');
 
-// 读取版本号
+// 读取版本号与产品名——消除硬编码
 const pkg = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf-8'));
 const version = pkg.version;
+const yamlContent = readFileSync(join(projectRoot, 'electron-builder.yml'), 'utf-8');
+const productNameMatch = yamlContent.match(/^productName:\s*(.+)$/m);
+const productName = productNameMatch ? productNameMatch[1].trim() : 'AI 同声传译助手';
 
 // 确保 unpacked 目录存在
-if (!existsSync(join(unpackedDir, 'AI 同声传译助手.exe'))) {
-  console.error('[pack-zip] Error: win-unpacked not found. Run "npm run build" first.');
+if (!existsSync(join(unpackedDir, `${productName}.exe`))) {
+  console.error(`[pack-zip] ${productName}.exe 不存在，请先执行 npm run build`);
   process.exit(1);
 }
 

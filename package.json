@@ -1,8 +1,9 @@
 {
   "name": "ai-interpreter",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "type": "module",
   "description": "AI 同声传译助手 — 实时英语→中文字幕翻译桌面应用",
+  "author": "Yaoniguan-Money",
   "main": "dist-electron/main.cjs",
   "scripts": {
     "dev": "vite",
