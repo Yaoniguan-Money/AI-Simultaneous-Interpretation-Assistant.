@@ -17,6 +17,8 @@ export interface ASRConfig {
   language?: string;
   /** 请求超时（毫秒），默认 10000 */
   timeout?: number;
+  /** 阿里云 NLS 服务区域（如 cn-shanghai, cn-beijing），默认 cn-shanghai */
+  region?: string;
 }
 
 /** ASR 识别结果 */
