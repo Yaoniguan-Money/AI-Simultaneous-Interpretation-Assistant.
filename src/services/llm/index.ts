@@ -7,6 +7,7 @@ export type {
   LLMConfig,
   LLMProvider,
   LLMProviderType,
+  MeetingMinutes,
   SharedContext,
   TermEntry,
   Token,

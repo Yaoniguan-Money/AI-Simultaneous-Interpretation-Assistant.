@@ -1,6 +1,7 @@
 import { useAtomValue } from 'jotai';
 import { historyAtom } from '../../stores/session-store';
 import { SummaryCard } from './SummaryCard';
+import { MeetingMinutesCard } from './MeetingMinutesCard';
 
 /**
  * 翻译历史视图
@@ -10,7 +11,7 @@ export function HistoryPanel({ onBack }: { onBack: () => void }): JSX.Element {
   const history = useAtomValue(historyAtom);
 
   return (
-    <div className="flex-1 flex flex-col">
+    <div className="flex-1 flex flex-col min-h-0">
       <button
         onClick={onBack}
         className="text-xs text-text-muted hover:text-text-primary transition-colors mb-4"
@@ -27,7 +28,10 @@ export function HistoryPanel({ onBack }: { onBack: () => void }): JSX.Element {
       ) : (
         <>
           {/* 历史条目列表 */}
-          <div className="flex-1 overflow-y-auto space-y-2 mb-4">
+          <div className="flex-1 overflow-y-auto min-h-0 space-y-2 mb-4">
+            {/* 会议纪要——放在列表最前面，确保用户第一眼就能看到 */}
+            <MeetingMinutesCard />
+
             {history.map((entry) => (
               <div
                 key={entry.id}
@@ -59,15 +63,16 @@ export function HistoryPanel({ onBack }: { onBack: () => void }): JSX.Element {
               复制全部
             </button>
             <button
-              onClick={() => exportMarkdown(history)}
+              onClick={() => exportText(history)}
               className="flex-1 py-2.5 rounded-btn bg-black text-white
                          text-xs font-medium hover:bg-[#333] transition-colors"
             >
-              导出 Markdown
+              导出 TXT
             </button>
           </div>
         </>
       )}
+
     </div>
   );
 }
@@ -88,17 +93,24 @@ function copyHistory(history: { timestamp: number; translation: string }[]): voi
   });
 }
 
-/** 导出为 Markdown 文件 */
-function exportMarkdown(history: { timestamp: number; translation: string }[]): void {
+/** 导出为纯文本文件 */
+function exportText(history: { timestamp: number; translation: string }[]): void {
   const lines = history.map((h, i) =>
-    `${i + 1}. \`${formatTime(h.timestamp)}\`\n   > ${h.translation}`,
+    `[${formatTime(h.timestamp)}] ${i + 1}. ${h.translation}`,
   );
-  const md = ['# Translation History\n', ...lines, ''].join('\n');
-  const blob = new Blob([md], { type: 'text/markdown' });
+  const txt = [
+    '翻译历史记录',
+    '='.repeat(40),
+    '',
+    ...lines,
+    '',
+    `导出时间: ${new Date().toLocaleString()}`,
+  ].join('\n');
+  const blob = new Blob([txt], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `translation-history-${new Date().toISOString().slice(0, 10)}.md`;
+  a.download = `translation-history-${new Date().toISOString().slice(0, 10)}.txt`;
   a.click();
   URL.revokeObjectURL(url);
 }
