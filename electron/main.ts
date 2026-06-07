@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage, session } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage, session, shell } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -130,4 +130,12 @@ ipcMain.handle(IPC_CHANNELS.SUBTITLE_UPDATE, (_event, data: unknown) => {
 /** 悬浮窗尺寸调整：OverlayWindow 渲染进程 → 主进程 */
 ipcMain.handle(IPC_CHANNELS.OVERLAY_RESIZE, (_event, width: number, height: number) => {
   resizeOverlayWindow(width, height);
+});
+
+/** 在系统默认浏览器中打开外部链接——用于演示模式等场景 */
+ipcMain.handle(IPC_CHANNELS.APP_OPEN_EXTERNAL, async (_event, url: string) => {
+  if (!url || typeof url !== 'string') return;
+  /** 仅允许 http/https 协议，防止滥用 */
+  if (!/^https?:\/\//i.test(url)) return;
+  await shell.openExternal(url);
 });

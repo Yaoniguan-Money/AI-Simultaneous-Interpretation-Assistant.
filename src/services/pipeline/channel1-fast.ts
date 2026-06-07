@@ -260,6 +260,8 @@ export class FastChannelPipeline {
     let isFirstToken = true;
     try {
       for await (const result of this.llm.translate(request)) {
+        /** stop() 后立即停止流式消费——配合 AbortController abort 作为二次防御 */
+        if (!this.active) break;
         /** 首个流式 token 携带原文文本，供字幕层展示英文（修复 B3：译文条目丢失 original 字段） */
         const enriched: TranslationResult = isFirstToken
           ? { ...result, originalText: text }

@@ -18,6 +18,8 @@ declare global {
     onSubtitleUpdate: (callback: (data: import('../src/types/subtitle').SubtitlePayload) => void) => (() => void);
     /** 请求主进程调整悬浮窗尺寸 */
     resizeOverlay: (width: number, height: number) => Promise<void>;
+    /** 在系统默认浏览器中打开外部链接（仅 http/https 协议） */
+    openExternal: (url: string) => Promise<void>;
   }
 
   interface Window {

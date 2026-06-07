@@ -32,6 +32,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   resizeOverlay: (width: number, height: number): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.OVERLAY_RESIZE, width, height),
   /**
+   * 在系统默认浏览器中打开外部链接
+   * @param url 要打开的 URL（仅 http/https 协议）
+   */
+  openExternal: (url: string): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.APP_OPEN_EXTERNAL, url),
+  /**
    * 接收字幕数据更新（OverlayWindow 渲染进程调用）
    * @param callback 收到新字幕数据时的回调
    * @returns 取消监听的清理函数
