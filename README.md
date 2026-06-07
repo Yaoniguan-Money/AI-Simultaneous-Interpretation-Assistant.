@@ -9,7 +9,7 @@
 ## 🖥️ 一键安装包（解压即用）
 
 **[点击下载 AI-Interpreter-x64.zip](https://pan.quark.cn/s/4b04f85466b5)**（夸克网盘）
-
+如若识别不到音频就先播放视频再开始翻译
 ## 🎬 演示视频
 
 **[点击观看演示视频](https://pan.quark.cn/s/a57ab87dae6c)**（夸克网盘）
@@ -129,7 +129,8 @@
 │   ├── ipc-channels.ts      # IPC 通道名称常量
 │   └── app-config.ts        # 应用全局配置常量
 └── scripts/
-    └── pack-zip.js          # ZIP 分发包打包脚本
+    ├── convert-to-ico.js    # PNG → ICO 图标转换
+    └── generate-icon.ps1    # 图标生成脚本
 ```
 
 ---
@@ -139,8 +140,8 @@
 ```bash
 npm install       # 安装依赖
 npm run dev       # 启动开发模式（Vite + Electron）
-npm run build     # 构建
-npm run dist      # 打包 ZIP 分发包
+npm run build     # 构建 + 打包 ZIP 分发包（解压即用）
+npm run clean     # 清理构建产物
 ```
 
 ---

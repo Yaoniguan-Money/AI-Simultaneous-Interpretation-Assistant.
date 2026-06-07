@@ -19,3 +19,9 @@ artifactName: AI-Interpreter-${version}-${arch}.${ext}
 files:
   - dist
   - dist-electron
+
+# ASAR 打包——应用代码归档为 app.asar，防止篡改
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/**/*.node"
