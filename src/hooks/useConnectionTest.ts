@@ -54,8 +54,6 @@ export function useConnectionTest<T>(
     try {
       const provider = createProvider(latestConfig);
       const ok = await provider.validateCredentials(latestConfig);
-      /** 验证返回值：确保 validateCredentials 明确返回 boolean true/false */
-      console.log('[useConnectionTest] validateCredentials result:', ok, 'typeof:', typeof ok);
       provider.dispose();
       if (ok) {
         setTestStatus('ok');
