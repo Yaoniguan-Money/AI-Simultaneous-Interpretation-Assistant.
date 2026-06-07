@@ -105,6 +105,8 @@ export class FastChannelPipeline {
   start(): void {
     if (this.active) return;
     this.active = true;
+    /** 初始化强制交付计时——允许首句也触发 5s 强制交付，避免 ASR 长时间不发 final 时首句翻译延迟 */
+    this.lastFinalTimestamp = Date.now();
   }
 
   /** 停止管线并清理全部状态 */
@@ -118,6 +120,15 @@ export class FastChannelPipeline {
     /** 释放外部资源：ASR WebSocket 连接和 LLM 进行中的 HTTP 流 */
     this.asr.dispose();
     this.llm.dispose();
+  }
+
+  /**
+   * 预热 ASR 连接——提前建立 WebSocket 和握手
+   * 可在音频捕获启动前调用，利用 getDisplayMedia 弹窗等待时间并行建连
+   * 失败不抛异常——recognize() 首次调用时会通过懒连接重试
+   */
+  async warmup(): Promise<void> {
+    await this.asr.preconnect?.();
   }
 
   /** 话题切换时重置翻译记忆，不停止管线 */

@@ -43,6 +43,13 @@ export interface ASRProvider {
   /** 配置并初始化，调用 API 前必须先调用此方法 */
   configure(config: ASRConfig): Promise<void>;
 
+  /**
+   * 预热连接——提前建立 WebSocket 和握手，可并行于音频捕获启动
+   * 默认 no-op，WebSocket 类供应商重写。已连接时幂等返回。
+   * 失败不抛异常——recognize() 首次调用时仍会重试连接作为 fallback
+   */
+  preconnect?(): Promise<void>;
+
   /** 发送一段音频数据进行识别，返回识别结果 */
   recognize(audio: Uint8Array): Promise<ASRResult>;
 
