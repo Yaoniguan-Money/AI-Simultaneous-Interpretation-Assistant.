@@ -7,16 +7,13 @@ import { hmacSha1Base64 } from '../../utils/crypto';
  * 参考文档：https://help.aliyun.com/zh/isi/real-time-speech-recognition-websocket-api
  *
  * 鉴权流程（两段式）：
- *   ① HTTP GET https://nls-meta.cn-shanghai.aliyuncs.com/pop/2018-05-18/tokens
+ *   ① HTTP GET https://nls-meta.{region}.aliyuncs.com/
  *      → 阿里云 POP 签名（HMAC-SHA1）→ 获取临时 Token（24h 有效）
- *   ② WebSocket wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1?token=<token>
+ *   ② WebSocket wss://nls-gateway-{region}.aliyuncs.com/ws/v1?token=<token>
  *      → 发送 StartTranscription 命令 → 收到 TranscriptionStarted → 逐帧 PCM → 接收结果
+ *   区域通过 ASRConfig.region 注入，默认 cn-shanghai
  */
 const PROTOCOL = {
-  /** Token 获取端点（阿里云 POP API） */
-  TOKEN_ENDPOINT: 'https://nls-meta.cn-shanghai.aliyuncs.com/pop/2018-05-18/tokens',
-  /** WebSocket 端点 */
-  WSS_URL: 'wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1',
   /** Token 有效期（秒）——Token 返回"ExpireTime":3600，提前 5 分钟刷新避免 WebSocket 中途断开 */
   TOKEN_TTL: 3300,
   /** 默认识别语言 */
@@ -26,6 +23,16 @@ const PROTOCOL = {
   /** 采样率 */
   SAMPLE_RATE: 16000,
 } as const;
+
+/** 阿里云 NLS Token 获取端点——区域通过配置注入，消除硬编码 */
+function getTokenEndpoint(region: string): string {
+  return `https://nls-meta.${region}.aliyuncs.com/`;
+}
+
+/** 阿里云 NLS WebSocket 实时识别端点——区域通过配置注入，消除硬编码 */
+function getWssUrl(region: string): string {
+  return `wss://nls-gateway-${region}.aliyuncs.com/ws/v1`;
+}
 
 /** 凭证字段名 */
 const CRED_KEY = {
@@ -125,14 +132,14 @@ export class AliyunASR implements ASRProvider {
   }
 
   async validateCredentials(config: ASRConfig): Promise<boolean> {
-    try {
-      await this.configure(config);
-      /** 获取 Token 成功即凭证有效 */
-      const token = await fetchToken(config.credentials.accessKeyId, config.credentials.accessKeySecret);
-      return token.length > 0;
-    } catch {
-      return false;
-    }
+    await this.configure(config);
+    /** 获取 Token 成功即凭证有效——错误原样抛出，由 useConnectionTest catch 分支展示详情 */
+    const token = await fetchToken(
+      config.credentials.accessKeyId,
+      config.credentials.accessKeySecret,
+      config.region ?? 'cn-shanghai',
+    );
+    return token.length > 0;
   }
 
   // ---- 私有方法 ----
@@ -151,7 +158,8 @@ export class AliyunASR implements ASRProvider {
       this.pendingInterim = [];
 
       const token = await this.getToken(cfg);
-      const url = `${cfg.endpoint ?? PROTOCOL.WSS_URL}?token=${encodeURIComponent(token)}`;
+      const wssUrl = cfg.endpoint ?? getWssUrl(cfg.region ?? 'cn-shanghai');
+      const url = `${wssUrl}?token=${encodeURIComponent(token)}`;
       this.ws = new WebSocket(url);
       let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -266,6 +274,7 @@ export class AliyunASR implements ASRProvider {
     const token = await fetchToken(
       cfg.credentials[CRED_KEY.accessKeyId],
       cfg.credentials[CRED_KEY.accessKeySecret],
+      cfg.region ?? 'cn-shanghai',
     );
 
     this.tokenCache = {
@@ -298,32 +307,38 @@ export class AliyunASR implements ASRProvider {
 /**
  * 通过阿里云 POP API 获取 NLS Token
  * 使用 HMAC-SHA1 签名鉴权
- * @param accessKeyId RAM 用户 AccessKey ID
- * @param accessKeySecret RAM 用户 AccessKey Secret
+ * @param accessKeyId  RAM 用户 AccessKey ID
+ * @param accessKeySecret  RAM 用户 AccessKey Secret
+ * @param region  NLS 服务区域（如 cn-shanghai）
  */
-async function fetchToken(accessKeyId: string, accessKeySecret: string): Promise<string> {
+async function fetchToken(accessKeyId: string, accessKeySecret: string, region: string): Promise<string> {
   const params: Record<string, string> = {
     AccessKeyId: accessKeyId,
     Action: 'CreateToken',
-    Version: '2018-05-18',
+    Version: '2019-02-28',
     Format: 'JSON',
-    RegionId: 'cn-shanghai',
+    RegionId: region,
     SignatureMethod: 'HMAC-SHA1',
     SignatureVersion: '1.0',
     SignatureNonce: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    Timestamp: new Date().toISOString().replace(/\.\d{3}/, '').replace(/-/g, '')
-      .replace(/:/g, '') + 'Z',
+    /** 标准 ISO 8601 格式，剔除毫秒部分，保留原有 Z 后缀 */
+    Timestamp: new Date().toISOString().replace(/\.\d{3}/, ''),
   };
 
-  /** 构建签名 */
+  /** 构建签名——阿里云 POP RPC 风格 POST 请求，参数在 body 中以 form-urlencoded 编码 */
   const sortedKeys = Object.keys(params).sort();
   const queryString = sortedKeys.map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`).join('&');
-  const stringToSign = `GET&${encodeURIComponent('/')}&${encodeURIComponent(queryString)}`;
+  const stringToSign = `POST&${encodeURIComponent('/')}&${encodeURIComponent(queryString)}`;
   const signature = await hmacSha1Base64(stringToSign, `${accessKeySecret}&`);
 
-  const url = `${PROTOCOL.TOKEN_ENDPOINT}?${queryString}&Signature=${encodeURIComponent(signature)}`;
+  const url = getTokenEndpoint(region);
+  const body = `${queryString}&Signature=${encodeURIComponent(signature)}`;
 
-  const response = await fetch(url, { method: 'GET' });
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
   if (!response.ok) {
     throw new Error(`阿里云 Token 获取失败: HTTP ${response.status}`);
   }
