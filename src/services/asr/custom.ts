@@ -35,6 +35,21 @@ export class CustomASR implements ASRProvider {
     this.config = { ...config };
   }
 
+  /**
+   * 预热 WebSocket 连接——提前建立与自定义 ASR 服务的连接
+   * 可在音频捕获启动前调用，利用 getDisplayMedia 弹窗等待时间并行建连
+   * 已连接时幂等返回，失败不抛异常——recognize() 首次调用时会重试
+   */
+  async preconnect(): Promise<void> {
+    const cfg = ensureConfigured(this.config, '自定义 ASR');
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+    try {
+      await this.connect(cfg);
+    } catch {
+      /** 预热失败静默——recognize() 内懒连接作为 fallback */
+    }
+  }
+
   async recognize(audio: Uint8Array): Promise<ASRResult> {
     const cfg = ensureConfigured(this.config, '自定义 ASR');
     if (!audio || audio.length === 0) {

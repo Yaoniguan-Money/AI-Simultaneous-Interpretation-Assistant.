@@ -70,6 +70,21 @@ export class DeepgramASR implements ASRProvider {
   }
 
   /**
+   * 预热 WebSocket 连接——提前建立与 Deepgram 的连接
+   * 可在音频捕获启动前调用，利用 getDisplayMedia 弹窗等待时间并行建连
+   * 已连接时幂等返回，失败不抛异常——recognize() 首次调用时会重试
+   */
+  async preconnect(): Promise<void> {
+    const cfg = ensureConfigured(this.config, 'Deepgram ASR');
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+    try {
+      await this.connect(cfg);
+    } catch {
+      /** 预热失败静默——recognize() 内懒连接作为 fallback */
+    }
+  }
+
+  /**
    * 发送 PCM 音频帧进行识别
    * 首次调用时懒建立 WebSocket，后续直接发送二进制帧
    * 音频格式：16kHz / 16bit / 单声道 / PCM

@@ -200,6 +200,9 @@ export function useTranslationSession(
     setMeetingMinutes({ status: 'idle' });
     sessionStartRef.current = Date.now();
 
+    /** ASR 连接预热 Promise——在 try 块外声明，catch 块中需清理以防孤儿 WebSocket */
+    let warmupPromise: Promise<void> | null = null;
+
     try {
       pipelineRef.current = await createPipeline(asrConfig, llmConfig);
       pipelineRef.current.start();
@@ -211,7 +214,25 @@ export function useTranslationSession(
       });
       audioCleanupRef.current = unsubAudio;
 
+      /**
+       * ASR 连接预热——与音频捕获并行启动
+       * audioCapture.start() 会弹出 getDisplayMedia 系统对话框（需用户选择屏幕），
+       * 利用用户操作弹窗的 1~3 秒等待时间在后台建立 ASR WebSocket 连接（Token + 握手）
+       */
+      warmupPromise = pipelineRef.current.warmup();
+
       await audioCapture.start();
+
+      /**
+       * 确保 ASR 连接就绪——预热通常在弹窗等待期间已完成
+       * 失败不阻塞翻译启动：recognize() 首次调用时 retain 懒连接作为可靠 fallback
+       */
+      try {
+        await warmupPromise;
+      } catch {
+        /** 连接预热失败——静默，recognize() 首次调用时 connect() 会自动重试 */
+      }
+
       setIsStarting(false);
       setIsTranslating(true);
     } catch (err) {
@@ -222,6 +243,8 @@ export function useTranslationSession(
       /** 清理已注册的 onChunk 回调——start 失败但回调可能已在 audioCapture.start() 前注册 */
       audioCleanupRef.current?.();
       audioCleanupRef.current = null;
+      /** 防止预热仍在进行时 dispose 导致孤儿 WebSocket——静默吞掉未处理 rejection */
+      warmupPromise?.catch(() => {});
       pipelineRef.current?.stop();
       pipelineRef.current = null;
     }
