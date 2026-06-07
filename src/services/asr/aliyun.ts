@@ -7,8 +7,8 @@ import { hmacSha1Base64 } from '../../utils/crypto';
  * 参考文档：https://help.aliyun.com/zh/isi/real-time-speech-recognition-websocket-api
  *
  * 鉴权流程（两段式）：
- *   ① HTTP GET https://nls-meta.{region}.aliyuncs.com/
- *      → 阿里云 POP 签名（HMAC-SHA1）→ 获取临时 Token（24h 有效）
+ *   ① HTTP POST https://nls-meta.{region}.aliyuncs.com/
+ *      → 阿里云 POP 签名（HMAC-SHA1）→ 获取临时 Token（1h 有效）
  *   ② WebSocket wss://nls-gateway-{region}.aliyuncs.com/ws/v1?token=<token>
  *      → 发送 StartTranscription 命令 → 收到 TranscriptionStarted → 逐帧 PCM → 接收结果
  *   区域通过 ASRConfig.region 注入，默认 cn-shanghai
@@ -63,7 +63,7 @@ interface TokenCache {
  * 阿里云 NLS 实时语音识别 WebSocket API 实现
  *
  * 遵循与 IFlyTekASR 一致的接口模式：懒连接、结果队列、连接锁、dispose 清理。
- * 额外处理：Token 自动获取与缓存（24h 有效期，提前 5 分钟刷新）。
+ * 额外处理：Token 自动获取与缓存（1h 有效期，提前 5 分钟刷新）。
  */
 export class AliyunASR implements ASRProvider {
   readonly name = 'aliyun';
@@ -95,13 +95,21 @@ export class AliyunASR implements ASRProvider {
       return emptyAsrResult(false);
     }
 
+    /** connect() 失败直接抛出——存在根本性障碍时（鉴权失败、服务未开通）不应静默重试 */
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      await this.connect(cfg);
+    }
+
     try {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        await this.connect(cfg);
-      }
       this.ws!.send(audio);
-    } catch {
-      return emptyAsrResult(true);
+    } catch (err) {
+      /** WebSocket 发送失败时关闭连接——下次 recognize() 会重新连接 */
+      console.error('[阿里云 ASR] 音频发送失败:', err instanceof Error ? err.message : err);
+      if (this.ws) {
+        this.ws.close();
+        this.ws = null;
+      }
+      throw err;
     }
 
     return this.consumeQueue();
@@ -114,14 +122,14 @@ export class AliyunASR implements ASRProvider {
   }
 
   dispose(): void {
-    /** 发送 StopTranscription 命令结束识别会话 */
+    /** 发送 StopTranscription 命令结束识别会话——header 含 appkey 与 namespace，对齐 SDK 协议 */
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         const stopMsg = JSON.stringify({
-          header: { name: 'StopTranscription', task_id: 'stop-task' },
+          header: this.buildNlsHeader('StopTranscription', this.config?.credentials[CRED_KEY.appKey] ?? '', 'stop-task'),
+          context: this.buildNlsContext(),
         });
-        const encoder = new TextEncoder();
-        this.ws.send(encoder.encode(stopMsg));
+        this.ws.send(stopMsg);
       } catch { /* 连接可能已断开 */ }
       this.ws.close(1000);
     }
@@ -146,7 +154,8 @@ export class AliyunASR implements ASRProvider {
 
   /**
    * 建立 WebSocket 连接并完成 NLS 握手
-   * 分三阶段：①获取 Token ②等待 WebSocket open ③等待 TranscriptionStarted 确认
+   * 分三阶段：①等待 WebSocket open ②发送 StartTranscription + 等待确认 ③注册结果处理器
+   * 各阶段抽取为独立方法，嵌套深度从 4 层降为 2 层
    */
   private async connect(cfg: ASRConfig): Promise<void> {
     if (this.connectingPromise) {
@@ -159,110 +168,131 @@ export class AliyunASR implements ASRProvider {
 
       const token = await this.getToken(cfg);
       const wssUrl = cfg.endpoint ?? getWssUrl(cfg.region ?? 'cn-shanghai');
-      const url = `${wssUrl}?token=${encodeURIComponent(token)}`;
-      this.ws = new WebSocket(url);
-      let connectTimer: ReturnType<typeof setTimeout> | null = null;
+      this.ws = new WebSocket(`${wssUrl}?token=${encodeURIComponent(token)}`);
 
       /** 阶段 ①：等待 WebSocket 连接建立 */
-      await new Promise<void>((resolve, reject) => {
-        this.ws!.onopen = () => {
-          if (connectTimer) clearTimeout(connectTimer);
-          resolve();
-        };
-        this.ws!.onerror = () => {
-          if (connectTimer) clearTimeout(connectTimer);
-          reject(new Error('阿里云 NLS WebSocket 连接失败'));
-        };
-        connectTimer = setTimeout(
-          () => reject(new Error('阿里云 NLS WebSocket 连接超时')),
-          PROTOCOL.CONNECT_TIMEOUT,
-        );
-      });
+      await this.awaitWebSocketOpen();
 
       /** 阶段 ②：发送 StartTranscription 并等待 TranscriptionStarted 确认 */
-      const appKey = cfg.credentials[CRED_KEY.appKey];
-      const startMsg = JSON.stringify({
-        header: {
-          name: 'StartTranscription',
-          task_id: `task-${Date.now()}`,
-          namespace: 'SpeechTranscriber',
-        },
-        payload: {
-          format: 'pcm',
-          sample_rate: PROTOCOL.SAMPLE_RATE,
-          enable_intermediate_result: true,
-          enable_punctuation_prediction: true,
-          enable_inverse_text_normalization: true,
-        },
-        context: { appkey: appKey },
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        let timer: ReturnType<typeof setTimeout> | null = null;
-
-        this.ws!.onmessage = (event: MessageEvent) => {
-          if (settled) return;
-          try {
-            const msg = JSON.parse(event.data as string) as AliyunNlsMessage;
-            if (msg.header.name === 'TranscriptionStarted') {
-              settled = true;
-              if (timer) clearTimeout(timer);
-              resolve();
-            } else if (msg.header.name === 'TaskFailed') {
-              settled = true;
-              if (timer) clearTimeout(timer);
-              reject(
-                new Error(`阿里云 NLS 启动失败: ${msg.header.status_text ?? '未知错误'}`),
-              );
-            }
-          } catch { /* 非 JSON 消息，忽略 */ }
-        };
-
-        this.ws!.onerror = () => {
-          if (settled) return;
-          settled = true;
-          if (timer) clearTimeout(timer);
-          reject(new Error('阿里云 NLS 握手阶段 WebSocket 错误'));
-        };
-
-        /** 发送 Start 命令 */
-        const encoder = new TextEncoder();
-        this.ws!.send(encoder.encode(startMsg));
-
-        timer = setTimeout(() => {
-          if (!settled) { settled = true; reject(new Error('阿里云 NLS 握手超时')); }
-        }, PROTOCOL.CONNECT_TIMEOUT);
-      });
+      await this.performNlsHandshake(cfg);
 
       /** 阶段 ③：注册结果处理器 */
-      this.ws.onmessage = (event: MessageEvent) => {
-        try {
-          const msg = JSON.parse(event.data as string) as AliyunNlsMessage;
-
-          if (msg.header.name === 'TranscriptionResultChanged') {
-            /** 中间结果 */
-            const result = extractNlsResult(msg, false);
-            if (result) this.resultQueue.push(result);
-          } else if (msg.header.name === 'SentenceEnd') {
-            /** 最终结果 */
-            const result = extractNlsResult(msg, true);
-            if (result) this.resultQueue.push(result);
-          }
-        } catch { /* JSON 解析失败，忽略 */ }
-      };
-
-      this.ws.onclose = () => {
-        this.resultQueue = [];
-        this.pendingInterim = [];
-      };
+      this.setupResultHandler();
     })();
 
     try {
       await this.connectingPromise;
+    } catch (err) {
+      /** 连接失败时关闭 WebSocket 并清空引用——避免下次 recognize() 向未就绪的连接发送音频 */
+      if (this.ws) {
+        this.ws.close();
+        this.ws = null;
+      }
+      throw err;
     } finally {
       this.connectingPromise = null;
     }
+  }
+
+  /** 阶段 ①：等待 WebSocket 连接建立——超时抛出明确错误 */
+  private awaitWebSocketOpen(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let connectTimer: ReturnType<typeof setTimeout> | null = null;
+      this.ws!.onopen = () => {
+        if (connectTimer) clearTimeout(connectTimer);
+        resolve();
+      };
+      this.ws!.onerror = () => {
+        if (connectTimer) clearTimeout(connectTimer);
+        reject(new Error('阿里云 NLS WebSocket 连接失败'));
+      };
+      connectTimer = setTimeout(
+        () => reject(new Error('阿里云 NLS WebSocket 连接超时')),
+        PROTOCOL.CONNECT_TIMEOUT,
+      );
+    });
+  }
+
+  /**
+   * 阶段 ②：发送 StartTranscription 并等待 TranscriptionStarted 确认
+   * appkey 位于 header 中（非 context），符合阿里云 NLS SDK 规范（lib/st.js:52-58）
+   */
+  private performNlsHandshake(cfg: ASRConfig): Promise<void> {
+    const appKey = cfg.credentials[CRED_KEY.appKey];
+    const taskId = `task-${Date.now()}`;
+    const startMsg = JSON.stringify({
+      header: this.buildNlsHeader('StartTranscription', appKey, taskId),
+      payload: {
+        format: 'pcm',
+        sample_rate: PROTOCOL.SAMPLE_RATE,
+        enable_intermediate_result: true,
+        enable_punctuation_prediction: true,
+        enable_inverse_text_normalization: true,
+      },
+      context: this.buildNlsContext(),
+    });
+
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      this.ws!.onmessage = (event: MessageEvent) => {
+        if (settled) return;
+        try {
+          const msg = JSON.parse(event.data as string) as AliyunNlsMessage;
+          if (msg.header.name === 'TranscriptionStarted') {
+            settled = true;
+            if (timer) clearTimeout(timer);
+            resolve();
+          } else if (msg.header.name === 'TaskFailed') {
+            settled = true;
+            if (timer) clearTimeout(timer);
+            console.error('[阿里云 ASR] 握手失败:', msg.header.status_text ?? '未知错误');
+            reject(
+              new Error(`阿里云 NLS 启动失败: ${msg.header.status_text ?? '未知错误'}`),
+            );
+          }
+        } catch { /* 非 JSON 消息，忽略 */ }
+      };
+
+      this.ws!.onerror = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        reject(new Error('阿里云 NLS 握手阶段 WebSocket 错误'));
+      };
+
+      /** 发送 Start 命令——以 Text Frame 发送 JSON 控制命令，WebSocket send(string) 自动使用 opcode 0x01 */
+      this.ws!.send(startMsg);
+
+      timer = setTimeout(() => {
+        if (!settled) { settled = true; reject(new Error('阿里云 NLS 握手超时')); }
+      }, PROTOCOL.CONNECT_TIMEOUT);
+    });
+  }
+
+  /** 阶段 ③：注册识别结果处理器——TranscriptionResultChanged 中间结果 + SentenceEnd 最终结果 */
+  private setupResultHandler(): void {
+    this.ws!.onmessage = (event: MessageEvent) => {
+      try {
+        const msg = JSON.parse(event.data as string) as AliyunNlsMessage;
+
+        if (msg.header.name === 'TranscriptionResultChanged') {
+          /** 中间结果 */
+          const result = extractNlsResult(msg, false);
+          if (result) this.resultQueue.push(result);
+        } else if (msg.header.name === 'SentenceEnd') {
+          /** 最终结果 */
+          const result = extractNlsResult(msg, true);
+          if (result) this.resultQueue.push(result);
+        }
+      } catch { /* JSON 解析失败，忽略 */ }
+    };
+
+    this.ws!.onclose = () => {
+      this.resultQueue = [];
+      this.pendingInterim = [];
+    };
   }
 
   /** 获取或缓存阿里云 NLS Token */
@@ -298,6 +328,32 @@ export class AliyunASR implements ASRProvider {
     if (missing.length > 0) {
       throw new Error(`阿里云 ASR 缺少凭证: ${missing.join(', ')}`);
     }
+  }
+
+  /** 生成 UUID v4 格式 message_id——对齐阿里云 NLS SDK 协议（lib/st.js） */
+  private generateMessageId(): string {
+    return crypto.randomUUID();
+  }
+
+  /**
+   * 构建 NLS 协议消息 header——消除 StartTranscription 与 StopTranscription 的重复结构
+   * appkey 位于 header 中（非 context），符合阿里云 NLS SDK 规范（lib/st.js:52-58）
+   */
+  private buildNlsHeader(name: string, appKey: string, taskId: string): Record<string, string> {
+    return {
+      message_id: this.generateMessageId(),
+      task_id: taskId,
+      namespace: 'SpeechTranscriber',
+      name,
+      appkey: appKey,
+    };
+  }
+
+  /** 构建 NLS context——SDK 元数据，不含业务鉴权参数 */
+  private buildNlsContext(): Record<string, unknown> {
+    return {
+      sdk: { name: 'nls-electron-renderer', version: '1.0.0', language: 'javascript' },
+    };
   }
 
 }
@@ -340,6 +396,7 @@ async function fetchToken(accessKeyId: string, accessKeySecret: string, region: 
     body,
   });
   if (!response.ok) {
+    console.error('[阿里云 ASR] Token 获取失败: HTTP', response.status);
     throw new Error(`阿里云 Token 获取失败: HTTP ${response.status}`);
   }
 

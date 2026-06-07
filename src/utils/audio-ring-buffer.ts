@@ -49,7 +49,7 @@ export class AudioRingBuffer {
 
   /**
    * 入队——满时覆盖最旧条目（丢弃最早音频，背压机制）
-   * @param data 原始音频数据（浅拷贝引用，调用方不得在入队后修改）
+   * @param data 原始音频数据（深拷贝后存储——避免外部缓冲区复用导致已入队数据被覆盖）
    * @param timestamp 音频时间戳（毫秒）
    */
   enqueue(data: Uint8Array, timestamp: number): void {
@@ -62,7 +62,9 @@ export class AudioRingBuffer {
       this.count--;
     }
 
-    this.slots[this.head] = { data, timestamp };
+    /** 深拷贝音频数据——pcmBufferCache 在 float32ToInt16() 中复用同一块内存，浅拷贝会导致缓冲区中所有帧指向同一被覆盖的数据 */
+    const copy = new Uint8Array(data);
+    this.slots[this.head] = { data: copy, timestamp };
     this.head = (this.head + 1) % this.capacity;
     this.count++;
   }
