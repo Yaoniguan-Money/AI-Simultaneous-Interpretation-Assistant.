@@ -3,7 +3,9 @@ import type {
   Correction,
   LLMConfig,
   LLMProvider,
+  MeetingMinutes,
   Token,
+  TranslatedSentence,
   TranslationRequest,
   TranslationResult,
 } from './types';
@@ -27,6 +29,16 @@ const PROTOCOL = {
   TRANSLATE_SYSTEM_PROMPT: buildTranslatePrompt(),
   /** 分析系统提示词模板 */
   ANALYZE_SYSTEM_PROMPT: buildAnalyzePrompt(),
+  /** 会议纪要系统提示词模板 */
+  MINUTES_SYSTEM_PROMPT: buildMinutesPrompt(),
+  /** 会议纪要默认温度——比翻译略高以保证内容多样性 */
+  MINUTES_TEMPERATURE: 0.3,
+  /** 会议纪要输入文本最大字符数，超出则采样截断 */
+  MINUTES_MAX_INPUT_CHARS: 6000,
+  /** 会议纪要截断时首部保留句数 */
+  MINUTES_HEAD_COUNT: 2,
+  /** 会议纪要截断时尾部保留句数 */
+  MINUTES_TAIL_COUNT: 8,
 } as const;
 
 /** 凭证字段名 */
@@ -132,8 +144,52 @@ export class DeepSeekLLM implements LLMProvider {
     return await this.parseAnalysisResponse(response);
   }
 
+  /**
+   * 根据完整翻译历史生成结构化会议纪要
+   * @param history 翻译历史记录（原文+译文对）
+   * @param durationSeconds 会议持续秒数，由调用方计算
+   * @returns 结构化会议纪要，失败时返回各字段为空的默认值
+   */
+  async generateMinutes(
+    history: TranslatedSentence[],
+    durationSeconds: number,
+  ): Promise<MeetingMinutes> {
+    const cfg = ensureConfigured(this.config, 'DeepSeek LLM');
+    /** 空历史无内容可总结——调用方应在调用前自行检查 */
+    if (!history || history.length === 0) {
+      throw new Error('翻译历史为空，无法生成会议纪要');
+    }
+
+    const endpoint = cfg.endpoint ?? PROTOCOL.ENDPOINT;
+    const model = cfg.model ?? PROTOCOL.MODEL;
+    const temperature = cfg.temperature ?? PROTOCOL.MINUTES_TEMPERATURE;
+
+    const userContent = this.buildMinutesUserPrompt(history, durationSeconds);
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: this.buildHeaders(cfg),
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: PROTOCOL.MINUTES_SYSTEM_PROMPT },
+          { role: 'user', content: userContent },
+        ],
+        stream: false,
+        temperature,
+        response_format: { type: 'json_object' },
+      }),
+    });
+
+    if (!response.ok) {
+      await this.handleHttpError(response);
+    }
+
+    return await this.parseMinutesResponse(response);
+  }
+
   dispose(): void {
-    this.abortController?.abort();
+    this.abortController?.abort('用户停止翻译');
     this.abortController = null;
     this.config = null;
   }
@@ -392,6 +448,92 @@ export class DeepSeekLLM implements LLMProvider {
     }
     throw new Error(`DeepSeek API HTTP ${response.status}: ${response.statusText}`);
   }
+
+  // ---- 会议纪要辅助 ----
+
+  /**
+   * 构造会议纪要生成的 user prompt
+   * 拼接翻译历史并附加结构化输出要求
+   */
+  private buildMinutesUserPrompt(
+    history: TranslatedSentence[],
+    durationSeconds: number,
+  ): string {
+    const minutes = Math.floor(durationSeconds / 60);
+    const truncated = this.truncateHistory(history);
+
+    const transcriptLines = truncated.map((s) =>
+      `[${s.index}] 原文: ${s.original}\n    译文: ${s.translation}`,
+    );
+
+    return [
+      `以下是一场约 ${minutes} 分钟的英文会议的中文翻译记录：`,
+      '',
+      ...transcriptLines,
+      '',
+      '请根据以上翻译记录，生成一份结构化的中文会议纪要。要求：',
+      '1. 以 JSON 格式返回，不要包含其他文字',
+      '2. 所有内容用中文输出',
+      '3. topic: 根据讨论内容推断会议主题（一句话）',
+      '4. keyTopics: 列出 2-5 个关键议题',
+      '5. discussionPoints: 每个议题下列出关键观点（topic + points 数组）',
+      '6. decisions: 列出会议中明确做出的决定',
+      '7. actionItems: 列出待办事项（description + 可选 assignee）',
+      '8. summary: 一段话总结会议核心内容和结论',
+      '如果某项没有足够信息，返回空数组或空字符串，不要编造内容。',
+    ].join('\n');
+  }
+
+  /**
+   * 截断过长的翻译历史，防止超出 LLM 上下文窗口
+   * 策略：首部保留少量（上下文锚点）+ 尾部保留最多（近因优先）
+   */
+  private truncateHistory(history: TranslatedSentence[]): TranslatedSentence[] {
+    const maxChars = PROTOCOL.MINUTES_MAX_INPUT_CHARS;
+    const totalChars = history.reduce(
+      (sum, s) => sum + s.original.length + s.translation.length,
+      0,
+    );
+    if (totalChars <= maxChars) return history;
+
+    const head = history.slice(0, PROTOCOL.MINUTES_HEAD_COUNT);
+    const tail = history.slice(-PROTOCOL.MINUTES_TAIL_COUNT);
+    /** 确保首尾不重叠（总句数不足时退化为全量） */
+    if (head.length + tail.length >= history.length) return history;
+    return [...head, ...tail];
+  }
+
+  /** 解析会议纪要 API 的 JSON 响应，失败时返回空纪要 */
+  private async parseMinutesResponse(
+    response: Response,
+  ): Promise<MeetingMinutes> {
+    const json = (await response.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const content = json.choices?.[0]?.message?.content ?? '{}';
+
+    try {
+      const parsed = JSON.parse(content) as {
+        topic?: string;
+        keyTopics?: string[];
+        discussionPoints?: { topic: string; points: string[] }[];
+        decisions?: string[];
+        actionItems?: { description: string; assignee?: string }[];
+        summary?: string;
+      };
+
+      return {
+        topic: parsed.topic ?? '',
+        keyTopics: parsed.keyTopics ?? [],
+        discussionPoints: parsed.discussionPoints ?? [],
+        decisions: parsed.decisions ?? [],
+        actionItems: parsed.actionItems ?? [],
+        summary: parsed.summary ?? '',
+      };
+    } catch {
+      throw new Error('会议纪要 JSON 解析失败：LLM 返回格式异常');
+    }
+  }
 }
 
 /** 翻译系统提示词 */
@@ -416,6 +558,27 @@ function buildAnalyzePrompt(): string {
     '  "terms": [{"original": "英文术语", "translation": "中文翻译"}],',
     '  "summary": "一句话摘要",',
     '  "topicShift": true/false',
+    '}',
+  ].join('\n');
+}
+
+/** 会议纪要生成系统提示词 */
+function buildMinutesPrompt(): string {
+  return [
+    '你是一个专业的会议记录员。你的任务是根据英文会议的翻译记录，生成结构化的中文会议纪要。',
+    '要求：',
+    '1. 只输出 JSON，不要包含任何思考过程、解释或 markdown 标记',
+    '2. 所有内容使用中文——因为用户是中文读者',
+    '3. 从翻译记录中提取事实，不要编造不存在的内容',
+    '4. 如果某项信息不足，对应字段返回空数组或空字符串',
+    '5. JSON 结构：',
+    '{',
+    '  "topic": "会议主题（一句话）",',
+    '  "keyTopics": ["议题1", "议题2"],',
+    '  "discussionPoints": [{"topic": "议题", "points": ["观点1", "观点2"]}],',
+    '  "decisions": ["决定1", "决定2"],',
+    '  "actionItems": [{"description": "待办事项", "assignee": "负责人（如有）"}],',
+    '  "summary": "一段话总结"',
     '}',
   ].join('\n');
 }

@@ -102,6 +102,22 @@ export interface AnalysisResult {
   topicShift: boolean;
 }
 
+/** 会议纪要——由 LLM 根据翻译历史在会话结束时自动生成 */
+export interface MeetingMinutes {
+  /** 会议主题/领域 */
+  topic: string;
+  /** 关键议题列表（2-5 个核心话题） */
+  keyTopics: string[];
+  /** 讨论要点（每个议题下的关键观点） */
+  discussionPoints: { topic: string; points: string[] }[];
+  /** 决策事项 */
+  decisions: string[];
+  /** 行动项（描述 + 可选负责人） */
+  actionItems: { description: string; assignee?: string }[];
+  /** 一段话总结会议核心内容与结论 */
+  summary: string;
+}
+
 /** LLM 供应商抽象接口——所有 LLM 实现必须遵守 */
 export interface LLMProvider {
   readonly name: string;
@@ -114,6 +130,9 @@ export interface LLMProvider {
 
   /** 上下文分析：领域检测、术语提取、摘要生成、话题切换判断 */
   analyze(sentences: string[], history: string[]): Promise<AnalysisResult>;
+
+  /** 根据完整翻译历史生成结构化会议纪要，在会话结束时调用 */
+  generateMinutes(history: TranslatedSentence[], durationSeconds: number): Promise<MeetingMinutes>;
 
   /** 释放资源 */
   dispose(): void;

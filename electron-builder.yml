@@ -1,17 +1,17 @@
+# electron-builder.yml —— 打包配置
+# 输出 zip 分发包，用户解压即用，免安装
 appId: com.ai-interpreter.app
 productName: AI 同声传译助手
 directories:
   output: release
 win:
   target:
-    - target: nsis
+    - target: zip
       arch:
         - x64
   icon: assets/icon.ico
-nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true
-  installerIcon: assets/icon.ico
+# 输出文件名：ASCII 安全，避免中文在 CI/CD 中乱码
+artifactName: AI-Interpreter-${version}-${arch}.${ext}
 files:
   - dist
   - dist-electron

@@ -1,6 +1,9 @@
 node_modules/
 dist/
 dist-electron/
+
+# 构建输出 —— 安装包与拆包目录
+release/
 .env
 .env.local
 *.log

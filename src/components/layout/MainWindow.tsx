@@ -68,7 +68,7 @@ export function MainWindow(): JSX.Element {
     <div className="h-full flex flex-col p-3"
          style={{ background: 'radial-gradient(ellipse at 50% 30%, rgba(99,102,241,0.04) 0%, transparent 70%), #FFFFFF' }}>
       {/* 毛玻璃主卡片 */}
-      <div className="flex-1 flex flex-col rounded-2xl border border-border
+      <div className="flex-1 flex flex-col min-h-0 rounded-2xl border border-border
                       bg-[rgba(255,255,255,0.72)] backdrop-blur-2xl p-7"
            style={{ backdropFilter: 'blur(24px) saturate(1.4)', WebkitBackdropFilter: 'blur(24px) saturate(1.4)' }}>
 

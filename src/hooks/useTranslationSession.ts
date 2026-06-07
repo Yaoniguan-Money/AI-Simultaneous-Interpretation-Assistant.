@@ -1,12 +1,12 @@
-import { useAtomValue, useSetAtom } from 'jotai';
+import { getDefaultStore, useAtomValue, useSetAtom } from 'jotai';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ASRConfig } from '../services/asr/types';
 import { createASRProvider } from '../services/asr/factory';
-import type { LLMConfig } from '../services/llm/types';
+import type { LLMConfig, LLMProvider } from '../services/llm/types';
 import { createLLMProvider } from '../services/llm/factory';
 import { FastChannelPipeline } from '../services/pipeline/channel1-fast';
 import { sharedContextAtom } from '../stores/shared-context';
-import { historyAtom, subtitleStackAtom } from '../stores/session-store';
+import { historyAtom, meetingMinutesAtom, subtitleStackAtom } from '../stores/session-store';
 import type { SubtitleEntry } from '../types/subtitle';
 import { useAudioCapture } from './useAudioCapture';
 import type { AudioSource } from './useAudioCapture';
@@ -52,12 +52,20 @@ export function useTranslationSession(
   const setSubtitleStack = useSetAtom(subtitleStackAtom);
   /** 历史记录写入函数 —— 完整句子追加，stop 时不清空 */
   const setHistory = useSetAtom(historyAtom);
+  /** 会议纪要写入函数 —— stop 时 LLM 生成后写入 */
+  const setMeetingMinutes = useSetAtom(meetingMinutesAtom);
 
   const pipelineRef = useRef<FastChannelPipeline | null>(null);
+  /** LLM 实例引用——与 pipeline 共享同一实例，stop 时用于生成纪要 */
+  const llmRef = useRef<LLMProvider | null>(null);
   const audioCleanupRef = useRef<(() => void) | null>(null);
   const idCounterRef = useRef(0);
   /** 当前正在流式接收的字幕 ID，null 表示无进行中的句子 */
   const activeIdRef = useRef<number | null>(null);
+  /** 会话开始时间戳——stop 时用于计算会议时长 */
+  const sessionStartRef = useRef<number>(0);
+  /** 停止进行中锁——防止异步 dispose 期间 start 创建新实例导致资源冲突 */
+  const stoppingRef = useRef(false);
 
   /** 音频捕获——根据 audioSource 参数选择麦克风或系统音频 */
   const audioCapture = useAudioCapture({ source: audioSource });
@@ -80,6 +88,8 @@ export function useTranslationSession(
     const llm = createLLMProvider(llmCfg);
     await asr.configure(asrCfg);
     await llm.configure(llmCfg);
+    /** 保留 LLM 引用，供 stop 时生成会议纪要用（需在 pipeline.stop() dispose 之前调用） */
+    llmRef.current = llm;
 
     const pipeline = new FastChannelPipeline(asr, llm, () => contextRef.current);
 
@@ -163,12 +173,20 @@ export function useTranslationSession(
       return;
     }
     if (isStarting || isTranslating) return;
+    /** 上一会话的异步 dispose 尚未完成，阻止重入 */
+    if (stoppingRef.current) {
+      setError('正在停止上一会话，请稍候');
+      return;
+    }
 
     setError(null);
     setIsStarting(true);
     idCounterRef.current = 0;
     activeIdRef.current = null;
     setSubtitleStack([]);
+    /** 新会话开始时复位会议纪要状态 */
+    setMeetingMinutes({ status: 'idle' });
+    sessionStartRef.current = Date.now();
 
     try {
       pipelineRef.current = await createPipeline(asrConfig, llmConfig);
@@ -197,18 +215,67 @@ export function useTranslationSession(
     }
   }, [asrConfig, llmConfig, isStarting, isTranslating, audioCapture, setSubtitleStack]);
 
-  /** 停止翻译：停音频 → 停管线 → 清字幕 */
+  /** 停止翻译：停音频 → flush 缓冲 → 生成纪要 → dispose 管线 → 清字幕 */
   const stop = useCallback((): void => {
     setIsStarting(false);
     audioCapture.stop();
     audioCleanupRef.current?.();
     audioCleanupRef.current = null;
-    pipelineRef.current?.stop();
-    pipelineRef.current = null;
+
+    const pipeline = pipelineRef.current;
+    const llm = llmRef.current;
+
+    if (pipeline && llm) {
+      /** 上锁：防止异步链完成前 start 创建新实例 */
+      stoppingRef.current = true;
+
+      /**
+       * 先 flush 让分句器缓冲中的剩余句子完成翻译并写入 historyAtom，
+       * 再基于完整 history 生成会议纪要，最后 dispose。
+       * Promise 链式编排——不使用 async/await 以保持 stop 同步返回。
+       */
+      pipeline.flush()
+        .then(() => {
+          /** 直接读 Jotai store 而非 ref——ref 仅在 React 渲染时更新，微任务中读到的是旧值 */
+          const currentHistory = getDefaultStore().get(historyAtom);
+          /** 无翻译记录时设为 empty 而非静默跳过——让 UI 展示明确提示 */
+          if (currentHistory.length === 0) {
+            setMeetingMinutes({ status: 'empty' });
+            return null;
+          }
+          const sentences = currentHistory.map((h) => ({
+            index: h.id,
+            original: h.original,
+            translation: h.translation,
+          }));
+          const durationSec = Math.round(
+            (Date.now() - sessionStartRef.current) / 1000,
+          );
+          setMeetingMinutes({ status: 'generating' });
+          return llm.generateMinutes(sentences, durationSec);
+        })
+        .then((data) => {
+          if (data) setMeetingMinutes({ status: 'done', data });
+        })
+        .catch((err: Error) =>
+          setMeetingMinutes({ status: 'error', error: err.message }),
+        )
+        .finally(() => {
+          pipeline.stop();
+          pipelineRef.current = null;
+          llmRef.current = null;
+          stoppingRef.current = false;
+        });
+    } else {
+      pipeline?.stop();
+      pipelineRef.current = null;
+      llmRef.current = null;
+    }
+
     activeIdRef.current = null;
     setIsTranslating(false);
     setSubtitleStack([]);
-  }, [audioCapture, setSubtitleStack]);
+  }, [audioCapture, setSubtitleStack, setMeetingMinutes]);
 
   return { isTranslating, isStarting, error, isConfigured, start, stop };
 }
