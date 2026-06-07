@@ -146,6 +146,12 @@ npm run clean     # 清理构建产物
 
 ---
 
+## 🎨 设计
+
+前端 UI 设计借助 [design-taste-frontend](https://github.com/anthropics/claude-code) Skill 辅助完成，包括字幕悬浮窗的透明穿透布局、设置面板的交互体验、以及整体视觉风格的打磨。
+
+---
+
 ## License
 
 MIT
