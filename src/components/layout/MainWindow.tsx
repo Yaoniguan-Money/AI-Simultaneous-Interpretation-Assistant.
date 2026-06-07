@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAtom, useAtomValue } from 'jotai';
-import { APP_NAME, APP_TAGLINE } from '../../../shared/app-config';
+import { APP_NAME, APP_TAGLINE, DEMO_VIDEO_URL } from '../../../shared/app-config';
 import {
   asrConfigAtom,
   audioSourceAtom,
@@ -252,7 +252,10 @@ function MainView({
       <div className="w-full space-y-1.5">
         <MenuCard label="翻译历史" onClick={() => onNavigate('history')} />
         <MenuCard label="API 设置" onClick={() => onNavigate('settings')} />
-        <MenuCard label="演示模式" onClick={() => onNavigate('demo')} />
+        <MenuCard
+          label="演示视频"
+          onClick={() => { window.electronAPI?.openExternal(DEMO_VIDEO_URL); }}
+        />
       </div>
     </div>
   );

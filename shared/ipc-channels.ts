@@ -13,4 +13,6 @@ export const IPC_CHANNELS = {
   SUBTITLE_UPDATE: 'subtitle:update',
   /** 悬浮窗尺寸调整：OverlayWindow 渲染进程 → 主进程 */
   OVERLAY_RESIZE: 'overlay:resize',
+  /** 在系统默认浏览器中打开外部链接 */
+  APP_OPEN_EXTERNAL: 'app:openExternal',
 } as const;

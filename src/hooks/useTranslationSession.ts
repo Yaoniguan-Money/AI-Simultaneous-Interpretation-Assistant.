@@ -28,6 +28,16 @@ export interface UseTranslationSessionReturn {
   stop: () => void;
 }
 
+/** 默认配置常量 */
+const DEFAULTS = {
+  /**
+   * stop() 异步清理安全超时（毫秒）
+   * 30s 足够覆盖正常 flush（~3s）+ 会议纪要生成（~15s）+ 网络波动余量，
+   * 超过此时间说明 LLM 已无响应，强制释放锁防止应用永久卡死
+   */
+  STOP_CLEANUP_TIMEOUT_MS: 30000,
+} as const;
+
 /**
  * 翻译会话 Hook —— 将音频捕获、ASR、LLM、字幕全部串联
  * 链路 A 的完整运行时：音频 PCM → FastChannelPipeline → subtitleStackAtom
@@ -66,6 +76,8 @@ export function useTranslationSession(
   const sessionStartRef = useRef<number>(0);
   /** 停止进行中锁——防止异步 dispose 期间 start 创建新实例导致资源冲突 */
   const stoppingRef = useRef(false);
+  /** stop() 异步清理安全定时器——promise 链 hang 住时的最终兜底 */
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** 音频捕获——根据 audioSource 参数选择麦克风或系统音频 */
   const audioCapture = useAudioCapture({ source: audioSource });
@@ -228,6 +240,14 @@ export function useTranslationSession(
     if (pipeline && llm) {
       /** 上锁：防止异步链完成前 start 创建新实例 */
       stoppingRef.current = true;
+      /** 安全兜底：超时后强制释放——LLM 无响应时防止应用永久卡死 */
+      stopTimerRef.current = setTimeout(() => {
+        pipeline.stop();
+        pipelineRef.current = null;
+        llmRef.current = null;
+        stoppingRef.current = false;
+        stopTimerRef.current = null;
+      }, DEFAULTS.STOP_CLEANUP_TIMEOUT_MS);
 
       /**
        * 先 flush 让分句器缓冲中的剩余句子完成翻译并写入 historyAtom，
@@ -261,6 +281,10 @@ export function useTranslationSession(
           setMeetingMinutes({ status: 'error', error: err.message }),
         )
         .finally(() => {
+          if (stopTimerRef.current) {
+            clearTimeout(stopTimerRef.current);
+            stopTimerRef.current = null;
+          }
           pipeline.stop();
           pipelineRef.current = null;
           llmRef.current = null;

@@ -76,7 +76,11 @@ export class OpenAICompatLLM implements LLMProvider {
   ]);
 
   private config: LLMConfig | null = null;
-  private abortController: AbortController | null = null;
+  /**
+   * 活跃请求的 AbortController 集合——每个 inflight 请求独立一个 controller，
+   * dispose() 时统一 abort 全部，避免旧 controller 被覆盖后变成孤儿无法取消
+   */
+  private abortControllers = new Set<AbortController>();
 
   /**
    * @param providerName 供应商名称（如 'deepseek'、'qwen'），用于日志和错误提示
@@ -104,18 +108,23 @@ export class OpenAICompatLLM implements LLMProvider {
       return;
     }
 
-    this.abortController = new AbortController();
-    const signal = this.abortController.signal;
-    const response = await this.sendTranslateRequest(cfg, request, signal);
+    const controller = new AbortController();
+    this.abortControllers.add(controller);
+    try {
+      const signal = controller.signal;
+      const response = await this.sendTranslateRequest(cfg, request, signal);
 
-    if (!response.ok) {
-      await this.handleHttpError(response);
-    }
-    if (!response.body) {
-      throw new Error(`${this.name} API 未返回流式响应体`);
-    }
+      if (!response.ok) {
+        await this.handleHttpError(response);
+      }
+      if (!response.body) {
+        throw new Error(`${this.name} API 未返回流式响应体`);
+      }
 
-    yield* this.readSSEStream(response.body.getReader());
+      yield* this.readSSEStream(response.body.getReader());
+    } finally {
+      this.abortControllers.delete(controller);
+    }
   }
 
   /** 上下文分析：领域检测、术语提取、摘要生成 */
@@ -175,31 +184,42 @@ export class OpenAICompatLLM implements LLMProvider {
 
     const userContent = this.buildMinutesUserPrompt(history, durationSeconds);
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: this.buildHeaders(cfg),
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: PROTOCOL.MINUTES_SYSTEM_PROMPT },
-          { role: 'user', content: userContent },
-        ],
-        stream: false,
-        temperature,
-        response_format: { type: 'json_object' },
-      }),
-    });
+    /** 创建独立 AbortController——dispose() 时统一取消，防止纪要生成 hang 住 */
+    const controller = new AbortController();
+    this.abortControllers.add(controller);
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: this.buildHeaders(cfg),
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: PROTOCOL.MINUTES_SYSTEM_PROMPT },
+            { role: 'user', content: userContent },
+          ],
+          stream: false,
+          temperature,
+          response_format: { type: 'json_object' },
+        }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      await this.handleHttpError(response);
+      if (!response.ok) {
+        await this.handleHttpError(response);
+      }
+
+      return await this.parseMinutesResponse(response);
+    } finally {
+      this.abortControllers.delete(controller);
     }
-
-    return await this.parseMinutesResponse(response);
   }
 
   dispose(): void {
-    this.abortController?.abort('用户停止翻译');
-    this.abortController = null;
+    /** 遍历全部活跃请求的 AbortController 统一取消——包括 translate SSE 流和 generateMinutes fetch */
+    for (const ctrl of this.abortControllers) {
+      ctrl.abort('用户停止翻译');
+    }
+    this.abortControllers.clear();
     this.config = null;
   }
 
