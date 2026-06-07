@@ -82,21 +82,23 @@ export function LLMSettings(): JSX.Element {
         <ApiKeyInput label="Endpoint" value={current.endpoint ?? ''} onChange={(v) => setConfig((prev) => { const base = prev ?? defaultConfig('custom'); return { ...base, endpoint: v }; })} placeholder="https://api.example.com/v1" />
       )}
 
-      {current.provider !== 'zhipu' && (
-        <div className="flex flex-col gap-1">
-          <label className="text-xs font-semibold text-text-muted uppercase tracking-wider">Model</label>
-          <input
-            ref={modelInputRef}
-            type="text"
-            defaultValue={current.model ?? defaultConfig(current.provider).model ?? ''}
-            onBlur={() => { const v = modelInputRef.current?.value ?? ''; if (v) updateModel(v); }}
-            placeholder="deepseek-chat"
-            className="w-full px-3 py-2.5 rounded-input border border-border bg-surface
-                       font-mono text-sm text-text-primary
-                       focus:outline-none focus:border-border-active transition-colors"
-          />
-        </div>
-      )}
+      {/* 所有供应商均可自定义模型 */}
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-semibold text-text-muted uppercase tracking-wider">Model</label>
+        <input
+          ref={modelInputRef}
+          type="text"
+          defaultValue={current.model ?? defaultConfig(current.provider).model ?? ''}
+          onBlur={() => { const v = modelInputRef.current?.value ?? ''; if (v) updateModel(v); }}
+          placeholder={current.provider === 'custom' ? 'gpt-3.5-turbo' : (
+            current.provider === 'qwen' ? 'qwen-plus' :
+            current.provider === 'zhipu' ? 'glm-4-flash' : 'deepseek-chat'
+          )}
+          className="w-full px-3 py-2.5 rounded-input border border-border bg-surface
+                     font-mono text-sm text-text-primary
+                     focus:outline-none focus:border-border-active transition-colors"
+        />
+      </div>
 
       <TestStatusBadge status={testStatus} onTest={testConnection} errorMessage={errorMessage} />
     </div>

@@ -49,4 +49,7 @@ export interface ASRProvider {
 
   /** 验证凭证是否有效，供设置面板"测试连接"使用 */
   validateCredentials(config: ASRConfig): Promise<boolean>;
+
+  /** 拉取本次 recognize() 调用期间累积的未消费 interim 结果，供 UI 实时展示 */
+  drainInterimResults(): ASRResult[];
 }

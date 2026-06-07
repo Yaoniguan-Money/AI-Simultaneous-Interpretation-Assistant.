@@ -73,11 +73,12 @@ export function ASRSettings(): JSX.Element {
       {current.provider === 'iflytek' && (
         <>
           <ApiKeyInput label="App ID" value={current.credentials['appId'] ?? ''} onChange={(v) => updateCred('appId', v)} />
-          <ApiKeyInput label="API Key" value={current.credentials['apiKey'] ?? ''} onChange={(v) => updateCred('apiKey', v)} />
+          <ApiKeyInput label="API Secret" placeholder="讯飞控制台的 APISecret（非 APIKey）" value={current.credentials['apiKey'] ?? ''} onChange={(v) => updateCred('apiKey', v)} />
         </>
       )}
       {current.provider === 'aliyun' && (
         <>
+          <ApiKeyInput label="项目 AppKey" placeholder="阿里云智能语音交互项目 AppKey" value={current.credentials['appKey'] ?? ''} onChange={(v) => updateCred('appKey', v)} />
           <ApiKeyInput label="AccessKey ID" value={current.credentials['accessKeyId'] ?? ''} onChange={(v) => updateCred('accessKeyId', v)} />
           <ApiKeyInput label="AccessKey Secret" value={current.credentials['accessKeySecret'] ?? ''} onChange={(v) => updateCred('accessKeySecret', v)} />
         </>

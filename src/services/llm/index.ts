@@ -1,5 +1,6 @@
 /** LLM 服务模块统一导出 */
 export { createLLMProvider } from './factory';
+export { OpenAICompatLLM } from './openai-compat';
 export type {
   AnalysisResult,
   Correction,

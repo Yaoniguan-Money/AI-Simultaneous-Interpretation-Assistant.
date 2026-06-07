@@ -206,14 +206,11 @@ export class FastChannelPipeline {
   }
 
   /**
-   * 尝试从 ASR 供应商拉取 pending interim 结果并分发给 UI
-   * 通过 duck-type 检查 drainInterimResults 方法存在性，供应商无关
+   * 从 ASR 供应商拉取 pending interim 结果并分发给 UI
+   * 通过 ASRProvider 接口方法调用，供应商无关
    */
   private drainAndDispatchInterim(): void {
-    const asr = this.asr as { drainInterimResults?: () => { text: string }[] };
-    if (typeof asr.drainInterimResults !== 'function') return;
-
-    const interimList = asr.drainInterimResults();
+    const interimList = this.asr.drainInterimResults();
     if (!interimList || interimList.length === 0) return;
 
     for (const r of interimList) {
