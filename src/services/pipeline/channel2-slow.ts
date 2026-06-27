@@ -83,10 +83,6 @@ export class Channel2Analyzer {
 
     /** 达到阈值且未在分析中，触发异步分析 */
     if (this.sentences.length >= this.sentenceThreshold && !this.analyzing) {
-      console.info('[channel2] slow channel triggered', {
-        ts: Date.now(),
-        queuedSentences: this.sentences.length,
-      });
       this.runAnalysis();
     }
   }
@@ -102,12 +98,7 @@ export class Channel2Analyzer {
   /** 触发分析（不 await，异步执行不阻塞调用方） */
   private runAnalysis(): void {
     this.executeAnalysis().catch((error) => {
-      const err = error instanceof Error ? error : new Error(String(error));
-      console.warn('[channel2] analysis failed', {
-        ts: Date.now(),
-        message: err.message,
-      });
-      this.errorCallbacks.forEach((cb) => cb(err));
+      this.errorCallbacks.forEach((cb) => cb(error));
     });
   }
 
@@ -126,17 +117,6 @@ export class Channel2Analyzer {
         sentencesToAnalyze,
         this.analysisHistory,
       );
-
-      console.info('[channel2] analysis completed', {
-        ts: Date.now(),
-        analyzedSentences: sentencesToAnalyze.length,
-        domain: result.domain?.name ?? null,
-        terms: result.terms.length,
-        hasSummary: result.summary.trim().length > 0,
-        topicShift: result.topicShift,
-      });
-
-      if (!this.active) return;
 
       /** 将分析摘要存入历史，用于下一轮的上下文 */
       if (result.summary) {

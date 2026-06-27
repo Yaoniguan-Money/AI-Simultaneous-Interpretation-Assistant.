@@ -9,8 +9,6 @@ export interface SegmenterConfig {
   pauseThresholdMs?: number;
   /** 最大缓冲时长（毫秒），超过此值强制交付 */
   maxBufferMs?: number;
-  firstSegmentMinChars?: number;
-  firstSegmentMaxMs?: number;
   /** 句末标点 */
   sentenceEndMarkers?: ReadonlySet<string>;
   /** 话题转换信号词（通常出现在新句开头） */
@@ -33,8 +31,6 @@ const DEFAULTS = {
    * 同时防止无停顿长句阻塞流水线。原 1.5s 对多从句长句严重不足。
    */
   MAX_BUFFER_MS: 4000,
-  FIRST_SEGMENT_MIN_CHARS: 28,
-  FIRST_SEGMENT_MAX_MS: 2500,
 } as const;
 
 /** 默认句末标点 */
@@ -60,14 +56,11 @@ export class SentenceSegmenter {
   private readonly config: Required<SegmenterConfig>;
   private buffer: BufferSegment[] = [];
   private lastTimestamp = 0;
-  private emittedCount = 0;
 
   constructor(config: SegmenterConfig = {}) {
     this.config = {
       pauseThresholdMs: config.pauseThresholdMs ?? DEFAULTS.PAUSE_MS,
       maxBufferMs: config.maxBufferMs ?? DEFAULTS.MAX_BUFFER_MS,
-      firstSegmentMinChars: config.firstSegmentMinChars ?? DEFAULTS.FIRST_SEGMENT_MIN_CHARS,
-      firstSegmentMaxMs: config.firstSegmentMaxMs ?? DEFAULTS.FIRST_SEGMENT_MAX_MS,
       sentenceEndMarkers: config.sentenceEndMarkers ?? DEFAULT_END_MARKERS,
       topicShiftWords: config.topicShiftWords ?? DEFAULT_TOPIC_SHIFT,
     };
@@ -119,23 +112,6 @@ export class SentenceSegmenter {
       this.buffer = [{ text: sentences[sentences.length - 1], timestamp }];
     }
 
-    if (this.emittedCount === 0 && results.length === 0 && this.buffer.length > 0) {
-      const firstTimestamp = this.buffer[0].timestamp;
-      const bufferedText = this.buffer.map((s) => s.text).join(' ').trim();
-      const bufferedMs = Math.max(0, timestamp - firstTimestamp);
-      if (
-        bufferedText.length >= this.config.firstSegmentMinChars ||
-        bufferedMs >= this.config.firstSegmentMaxMs
-      ) {
-        const sentence = this.drainBuffer();
-        if (sentence) results.push(sentence);
-      }
-    }
-
-    if (results.length > 0) {
-      this.emittedCount += results.length;
-    }
-
     return results;
   }
 
@@ -150,7 +126,6 @@ export class SentenceSegmenter {
   reset(): void {
     this.buffer = [];
     this.lastTimestamp = 0;
-    this.emittedCount = 0;
   }
 
   /** 排空缓冲并拼接为一条文本 */

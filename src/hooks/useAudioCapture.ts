@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { firstScreenLatency } from '../utils/first-screen-latency';
 
 /** 音频捕获源 */
 export type AudioSource = 'system' | 'microphone';
@@ -115,7 +114,6 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
         autoGainControl: DEFAULTS.AUTO_GAIN_CONTROL,
       },
     });
-    firstScreenLatency.mark('audio_ready', 'source=microphone');
     await processStream(stream, sampleRate);
   }, [stop]);
 
@@ -148,7 +146,6 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
       },
       video: { width: 4, height: 4, frameRate: 1 },
     });
-    firstScreenLatency.mark('audio_ready', 'source=system');
 
     /** 视频轨道的释放移至 processStream 内 AudioContext 初始化之后
      *  过早停止视频轨道可能导致整个捕获会话被 Windows 撤销 */
@@ -201,10 +198,6 @@ export function useAudioCapture(config: AudioCaptureConfig): UseAudioCaptureRetu
       }
 
       const pcm16 = float32ToInt16(floatSamples);
-      firstScreenLatency.mark(
-        'first_audio_chunk',
-        `samples=${pcm16.length} max=${maxSample.toFixed(6)}`,
-      );
       callbacksRef.current.forEach((cb) => cb(pcm16));
     };
 

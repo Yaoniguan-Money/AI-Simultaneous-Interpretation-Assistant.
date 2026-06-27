@@ -1,6 +1,5 @@
 import type { ASRConfig, ASRProvider, ASRResult } from './types';
 import { consumeAsrResultQueue, emptyAsrResult, ensureConfigured } from '../provider-utils';
-import { firstScreenLatency } from '../../utils/first-screen-latency';
 
 /**
  * 自定义 WebSocket ASR 协议常量
@@ -62,7 +61,6 @@ export class CustomASR implements ASRProvider {
         await this.connect(cfg);
       }
       this.ws!.send(audio);
-      firstScreenLatency.mark('first_audio_sent', `provider=${this.name} bytes=${audio.byteLength}`);
     } catch {
       return emptyAsrResult(true);
     }
@@ -143,7 +141,6 @@ export class CustomASR implements ASRProvider {
       await new Promise<void>((resolve, reject) => {
         this.ws!.onopen = () => {
           if (connectTimer) clearTimeout(connectTimer);
-          firstScreenLatency.mark('asr_ws_open', `provider=${this.name}`);
           resolve();
         };
         this.ws!.onerror = () => {

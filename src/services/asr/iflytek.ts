@@ -1,7 +1,6 @@
 import type { ASRConfig, ASRProvider, ASRResult } from './types';
 import { consumeAsrResultQueue, emptyAsrResult, ensureConfigured } from '../provider-utils';
 import { hmacSha1Base64, md5Hex } from '../../utils/crypto';
-import { firstScreenLatency } from '../../utils/first-screen-latency';
 
 /**
  * 讯飞实时语音转写（RTASR）WebSocket API 协议常量
@@ -118,7 +117,6 @@ export class IFlyTekASR implements ASRProvider {
       }
       /** 发送 Uint8Array 视图自身——WebSocket 原生支持 ArrayBufferView，自动处理偏移与长度 */
       this.ws!.send(audio);
-      firstScreenLatency.mark('first_audio_sent', `provider=${this.name} bytes=${audio.byteLength}`);
     } catch {
       return emptyAsrResult(true);
     }
@@ -199,7 +197,6 @@ export class IFlyTekASR implements ASRProvider {
       await new Promise<void>((resolve, reject) => {
         this.ws!.onopen = () => {
           if (connectTimer) clearTimeout(connectTimer);
-          firstScreenLatency.mark('asr_ws_open', `provider=${this.name}`);
           resolve();
         };
         this.ws!.onerror = () => {

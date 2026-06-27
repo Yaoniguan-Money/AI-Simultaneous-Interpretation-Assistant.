@@ -1,7 +1,6 @@
 import type { ASRConfig, ASRProvider, ASRResult } from './types';
 import { consumeAsrResultQueue, emptyAsrResult, ensureConfigured } from '../provider-utils';
 import { hmacSha1Base64 } from '../../utils/crypto';
-import { firstScreenLatency } from '../../utils/first-screen-latency';
 
 /**
  * 阿里云智能语音交互（NLS）实时语音识别 WebSocket API 协议常量
@@ -118,7 +117,6 @@ export class AliyunASR implements ASRProvider {
 
     try {
       this.ws!.send(audio);
-      firstScreenLatency.mark('first_audio_sent', `provider=${this.name} bytes=${audio.byteLength}`);
     } catch (err) {
       /** WebSocket 发送失败时关闭连接——下次 recognize() 会重新连接 */
       console.error('[阿里云 ASR] 音频发送失败:', err instanceof Error ? err.message : err);
@@ -217,7 +215,6 @@ export class AliyunASR implements ASRProvider {
       let connectTimer: ReturnType<typeof setTimeout> | null = null;
       this.ws!.onopen = () => {
         if (connectTimer) clearTimeout(connectTimer);
-        firstScreenLatency.mark('asr_ws_open', `provider=${this.name}`);
         resolve();
       };
       this.ws!.onerror = () => {

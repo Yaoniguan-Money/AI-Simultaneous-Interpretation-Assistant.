@@ -10,11 +10,7 @@
     "build": "tsc && vite build && electron-builder --win",
     "preview": "vite preview",
     "clean": "node -e \"require('fs').rmSync('./dist',{recursive:true,force:true});require('fs').rmSync('./dist-electron',{recursive:true,force:true});require('fs').rmSync('./release',{recursive:true,force:true})\"",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "test": "vitest",
-    "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest --watch"
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
     "react": "^18.3.1",

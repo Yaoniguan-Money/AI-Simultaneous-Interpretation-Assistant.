@@ -138,7 +138,7 @@
 ## 🔧 开发
 
 ```bash
-npm install (AI-Simultaneous-Interpretation-Assistant.-master\)      # 安装依赖
+npm install       # 安装依赖
 npm run dev       # 启动开发模式（Vite + Electron）
 npm run build     # 构建 + 打包 ZIP 分发包（解压即用）
 npm run clean     # 清理构建产物
