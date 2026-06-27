@@ -258,7 +258,10 @@ export class OpenAICompatLLM implements LLMProvider {
     const endpoint = cfg.endpoint ?? this.defaultEndpoint;
     const model = cfg.model ?? this.defaultModel;
     const temperature = cfg.temperature ?? PROTOCOL.TRANSLATE_TEMPERATURE;
-    const maxTokens = cfg.maxTokens ?? PROTOCOL.MAX_TOKENS;
+    const configuredMaxTokens = cfg.maxTokens ?? PROTOCOL.MAX_TOKENS;
+    const maxTokens = request.mode === 'preview'
+      ? Math.min(configuredMaxTokens, 256)
+      : configuredMaxTokens;
 
     const systemPrompt = this.buildTranslationSystemPrompt(request);
     const messages = [
@@ -322,6 +325,15 @@ export class OpenAICompatLLM implements LLMProvider {
   }
 
   private buildTranslationSystemPrompt(request: TranslationRequest): string {
+    if (request.mode === 'preview') {
+      return [
+        'You are a real-time English to Chinese subtitle translator.',
+        'Translate the English speech fragment into natural Chinese.',
+        'Only output the Chinese translation.',
+        'Do not explain, do not add notes, and do not complete missing facts.',
+      ].join('\n');
+    }
+
     const parts = [PROTOCOL.TRANSLATE_SYSTEM_PROMPT];
 
     const ctx = request.context;
@@ -333,6 +345,9 @@ export class OpenAICompatLLM implements LLMProvider {
         .map(([en, zh]) => `"${en}" → "${zh}"`)
         .join(', ');
       parts.push(`【术语映射】${terms}`);
+    }
+    if (ctx.recentSummary.trim()) {
+      parts.push(`【近期摘要】${ctx.recentSummary.trim()}`);
     }
 
     if (request.previousSentences.length > 0) {

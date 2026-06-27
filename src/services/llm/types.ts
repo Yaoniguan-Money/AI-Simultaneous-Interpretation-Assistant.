@@ -49,6 +49,7 @@ export interface SharedContext {
 export interface TranslationRequest {
   text: string;
   context: SharedContext;
+  mode?: 'preview' | 'final';
   /** 前几句翻译记录，用于一致性检测和修正 */
   previousSentences: TranslatedSentence[];
 }
@@ -78,6 +79,8 @@ export interface TranslationResult {
   tokens: Token[];
   /** 被翻译的原文句子——管道填充，供字幕层展示英文原文（可选，修正/中间 token 无此字段） */
   originalText?: string;
+  segmentId?: string;
+  phase?: 'preview' | 'final';
 }
 
 /** 领域检测结果 */

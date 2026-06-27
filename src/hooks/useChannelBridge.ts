@@ -10,22 +10,28 @@ import {
 import type { FastChannelPipeline } from '../services/pipeline/channel1-fast';
 import type { Channel2Analyzer } from '../services/pipeline/channel2-slow';
 
+export interface ChannelBridgeTarget {
+  analyzer: Channel2Analyzer;
+  pipeline: FastChannelPipeline;
+}
+
 /**
  * 双通道桥接 Hook
  * 将 Channel 2 的分析结果写入 Jotai 共享上下文原子
  * Channel 1 下次翻译时通过 getSharedContext 自动读取最新值
  * 组件卸载时自动取消回调订阅
  */
-export function useChannelBridge(
-  analyzer: Channel2Analyzer,
-  pipeline: FastChannelPipeline,
-): void {
+export function useChannelBridge(target: ChannelBridgeTarget | null): void {
   const updateDomain = useSetAtom(updateDomainAtom);
   const updateTerms = useSetAtom(updateTermsAtom);
   const updateSummary = useSetAtom(updateSummaryAtom);
   const addTopic = useSetAtom(addTopicAtom);
+  const analyzer = target?.analyzer ?? null;
+  const pipeline = target?.pipeline ?? null;
 
   useEffect(() => {
+    if (!analyzer || !pipeline) return;
+
     /** Channel 2 分析结果 → Jotai 原子 */
     const unsubAnalysis = analyzer.onAnalysis((result: AnalysisResult) => {
       /** ① 领域信号 */
@@ -49,6 +55,14 @@ export function useChannelBridge(
         pipeline.resetContext();
         addTopic(result.domain?.name ?? '未知', Date.now());
       }
+
+      console.info('[channel2] context updated', {
+        ts: Date.now(),
+        domain: result.domain?.name ?? null,
+        terms: result.terms.length,
+        hasSummary: result.summary.trim().length > 0,
+        topicShift: result.topicShift,
+      });
     });
 
     /** Channel 2 错误 → 暂由分析器自行分发，后续 PR 可接 Toast */

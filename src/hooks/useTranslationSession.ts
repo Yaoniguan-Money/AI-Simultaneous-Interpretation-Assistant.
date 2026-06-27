@@ -5,12 +5,16 @@ import { createASRProvider } from '../services/asr/factory';
 import type { LLMConfig, LLMProvider } from '../services/llm/types';
 import { createLLMProvider } from '../services/llm/factory';
 import { FastChannelPipeline } from '../services/pipeline/channel1-fast';
+import { Channel2Analyzer } from '../services/pipeline/channel2-slow';
 import { sharedContextAtom } from '../stores/shared-context';
 import { historyAtom, meetingMinutesAtom, subtitleStackAtom } from '../stores/session-store';
 import type { SubtitleEntry } from '../types/subtitle';
 import { useAudioCapture } from './useAudioCapture';
 import type { AudioSource } from './useAudioCapture';
 import type { TranslationResult } from '../services/llm/types';
+import { firstScreenLatency } from '../utils/first-screen-latency';
+import { useChannelBridge } from './useChannelBridge';
+import type { ChannelBridgeTarget } from './useChannelBridge';
 
 /** Hook 返回值 */
 export interface UseTranslationSessionReturn {
@@ -66,12 +70,15 @@ export function useTranslationSession(
   const setMeetingMinutes = useSetAtom(meetingMinutesAtom);
 
   const pipelineRef = useRef<FastChannelPipeline | null>(null);
+  const analyzerRef = useRef<Channel2Analyzer | null>(null);
+  const [channelBridgeTarget, setChannelBridgeTarget] = useState<ChannelBridgeTarget | null>(null);
   /** LLM 实例引用——与 pipeline 共享同一实例，stop 时用于生成纪要 */
   const llmRef = useRef<LLMProvider | null>(null);
   const audioCleanupRef = useRef<(() => void) | null>(null);
   const idCounterRef = useRef(0);
   /** 当前正在流式接收的字幕 ID，null 表示无进行中的句子 */
   const activeIdRef = useRef<number | null>(null);
+  const segmentSubtitleIdsRef = useRef<Map<string, number>>(new Map());
   /** 会话开始时间戳——stop 时用于计算会议时长 */
   const sessionStartRef = useRef<number>(0);
   /** 停止进行中锁——防止异步 dispose 期间 start 创建新实例导致资源冲突 */
@@ -81,6 +88,7 @@ export function useTranslationSession(
 
   /** 音频捕获——根据 audioSource 参数选择麦克风或系统音频 */
   const audioCapture = useAudioCapture({ source: audioSource });
+  useChannelBridge(channelBridgeTarget);
 
   const isConfigured = asrConfig !== null && llmConfig !== null;
 
@@ -103,10 +111,64 @@ export function useTranslationSession(
     /** 保留 LLM 引用，供 stop 时生成会议纪要用（需在 pipeline.stop() dispose 之前调用） */
     llmRef.current = llm;
 
-    const pipeline = new FastChannelPipeline(asr, llm, () => contextRef.current);
+    const analyzer = new Channel2Analyzer(llm);
+    const pipeline = new FastChannelPipeline(asr, llm, () => contextRef.current, {
+      onFinalSentences: (sentences) => {
+        analyzer.feedSentences(sentences);
+      },
+    });
+    analyzer.start();
+    analyzerRef.current = analyzer;
+    setChannelBridgeTarget({ analyzer, pipeline });
 
     /** 管线翻译回调 → subtitleStackAtom */
     pipeline.onTranslation((result: TranslationResult) => {
+      if (result.segmentId) {
+        let subtitleId = segmentSubtitleIdsRef.current.get(result.segmentId) ?? null;
+        if (subtitleId === null) {
+          subtitleId = ++idCounterRef.current;
+          segmentSubtitleIdsRef.current.set(result.segmentId, subtitleId);
+        }
+
+        setSubtitleStack((prev) => {
+          const existing = prev.some((e) => e.id === subtitleId);
+          if (existing) {
+            return prev.map((e) =>
+              e.id === subtitleId
+                ? {
+                    ...e,
+                    translation: result.translation,
+                    original: result.originalText ?? e.original,
+                    isComplete: result.tokens.length === 0,
+                  }
+                : e,
+            );
+          }
+
+          const entry: SubtitleEntry = {
+            id: subtitleId,
+            timestamp: Date.now(),
+            original: result.originalText ?? '',
+            translation: result.translation,
+            isComplete: result.tokens.length === 0,
+            correction: null,
+          };
+          return [...prev, entry];
+        });
+
+        if (result.tokens.length === 0 && result.phase !== 'preview') {
+          setHistory((prev) => [...prev, {
+            id: subtitleId,
+            timestamp: Date.now(),
+            original: result.originalText ?? '',
+            translation: result.translation,
+            isComplete: true,
+            correction: null,
+          }]);
+        }
+        return;
+      }
+
       setSubtitleStack((prev) => {
         const activeId = activeIdRef.current;
         if (activeId !== null) {
@@ -180,6 +242,7 @@ export function useTranslationSession(
 
   /** 开始翻译：防重入 → 实例化管线 → 接线音频 → 启动 */
   const start = useCallback(async (): Promise<void> => {
+    firstScreenLatency.start(`source=${audioSource}`);
     if (!asrConfig || !llmConfig) {
       setError('请先配置 ASR 和 LLM 的 API Key');
       return;
@@ -195,6 +258,7 @@ export function useTranslationSession(
     setIsStarting(true);
     idCounterRef.current = 0;
     activeIdRef.current = null;
+    segmentSubtitleIdsRef.current.clear();
     setSubtitleStack([]);
     /** 新会话开始时复位会议纪要状态 */
     setMeetingMinutes({ status: 'idle' });
@@ -245,10 +309,13 @@ export function useTranslationSession(
       audioCleanupRef.current = null;
       /** 防止预热仍在进行时 dispose 导致孤儿 WebSocket——静默吞掉未处理 rejection */
       warmupPromise?.catch(() => {});
+      analyzerRef.current?.stop();
+      analyzerRef.current = null;
+      setChannelBridgeTarget(null);
       pipelineRef.current?.stop();
       pipelineRef.current = null;
     }
-  }, [asrConfig, llmConfig, isStarting, isTranslating, audioCapture, setSubtitleStack]);
+  }, [asrConfig, llmConfig, audioSource, isStarting, isTranslating, audioCapture, setSubtitleStack]);
 
   /** 停止翻译：停音频 → flush 缓冲 → 生成纪要 → dispose 管线 → 清字幕 */
   const stop = useCallback((): void => {
@@ -259,17 +326,21 @@ export function useTranslationSession(
 
     const pipeline = pipelineRef.current;
     const llm = llmRef.current;
+    const analyzer = analyzerRef.current;
 
     if (pipeline && llm) {
       /** 上锁：防止异步链完成前 start 创建新实例 */
       stoppingRef.current = true;
       /** 安全兜底：超时后强制释放——LLM 无响应时防止应用永久卡死 */
       stopTimerRef.current = setTimeout(() => {
-        pipeline.stop();
-        pipelineRef.current = null;
-        llmRef.current = null;
-        stoppingRef.current = false;
-        stopTimerRef.current = null;
+          pipeline.stop();
+          analyzer?.stop();
+          pipelineRef.current = null;
+          analyzerRef.current = null;
+          setChannelBridgeTarget(null);
+          llmRef.current = null;
+          stoppingRef.current = false;
+          stopTimerRef.current = null;
       }, DEFAULTS.STOP_CLEANUP_TIMEOUT_MS);
 
       /**
@@ -309,17 +380,24 @@ export function useTranslationSession(
             stopTimerRef.current = null;
           }
           pipeline.stop();
+          analyzer?.stop();
           pipelineRef.current = null;
+          analyzerRef.current = null;
+          setChannelBridgeTarget(null);
           llmRef.current = null;
           stoppingRef.current = false;
         });
     } else {
       pipeline?.stop();
+      analyzer?.stop();
       pipelineRef.current = null;
+      analyzerRef.current = null;
+      setChannelBridgeTarget(null);
       llmRef.current = null;
     }
 
     activeIdRef.current = null;
+    segmentSubtitleIdsRef.current.clear();
     setIsTranslating(false);
     setSubtitleStack([]);
   }, [audioCapture, setSubtitleStack, setMeetingMinutes]);

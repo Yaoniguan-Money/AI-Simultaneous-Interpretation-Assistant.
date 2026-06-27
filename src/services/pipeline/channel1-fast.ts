@@ -9,6 +9,7 @@ import type {
 import { SentenceSegmenter } from './sentence-segmenter';
 import type { SegmenterConfig } from './sentence-segmenter';
 import { AudioRingBuffer } from '../../utils/audio-ring-buffer';
+import { firstScreenLatency } from '../../utils/first-screen-latency';
 
 /** 管线配置 */
 export interface PipelineConfig {
@@ -18,6 +19,8 @@ export interface PipelineConfig {
   forceDeliveryMs?: number;
   /** 分句器配置——覆盖默认的静音阈值和最大缓冲时长 */
   segmenterConfig?: SegmenterConfig;
+  /** Final sentence output hook for non-blocking slow-channel analysis. */
+  onFinalSentences?: (sentences: string[]) => void;
 }
 
 /** 默认配置 */
@@ -31,7 +34,24 @@ const DEFAULTS = {
    * 5s 给 ASR 充足时间确认 final，与分句器 4s maxBufferMs 配合不冲突。
    */
   FORCE_DELIVERY_MS: 5000,
+  PREVIEW_MIN_INTERVAL_MS: 1300,
+  PREVIEW_MIN_CHAR_DELTA: 10,
+  PREVIEW_MIN_LENGTH: 10,
+  PREVIEW_TARGET_WORDS: 8,
+  PREVIEW_MIN_WORDS: 6,
+  PREVIEW_FORCE_MS: 1300,
 } as const;
+
+const PREVIEW_BOUNDARY_WORDS = new Set([
+  'and',
+  'but',
+  'so',
+  'because',
+  'that',
+  'which',
+  'when',
+  'where',
+]);
 
 /**
  * 最小可翻译文本长度（字符数）
@@ -47,6 +67,14 @@ export type InterimResultCallback = (text: string) => void;
 
 /** 管线错误回调 */
 export type PipelineErrorCallback = (error: Error) => void;
+
+type TranslationPhase = 'preview' | 'final';
+
+interface TranslationJob {
+  text: string;
+  segmentId: string;
+  phase: TranslationPhase;
+}
 
 /**
  * Channel 1 快通道管线编排器
@@ -69,6 +97,15 @@ export class FastChannelPipeline {
   private lastFinalTimestamp = 0;
   /** 最新一条 interim 文本，长时间无 final 时作为伪 final 送入分段器 */
   private latestInterimText = '';
+  private firstInterimTimestamp = 0;
+  private lastPreviewTimestamp = 0;
+  private lastPreviewText = '';
+  private activePreviewSegmentId: string | null = null;
+  private nextSegmentIndex = 0;
+  private translationQueue: TranslationJob[] = [];
+  private translating = false;
+  private supersededPreviewSegments = new Set<string>();
+  private readonly onFinalSentences?: (sentences: string[]) => void;
 
   constructor(
     private asr: ASRProvider,
@@ -81,6 +118,7 @@ export class FastChannelPipeline {
     this.segmenter = new SentenceSegmenter(config.segmenterConfig);
     /** 强制交付阈值通过配置注入，可被 PipelineConfig.forceDeliveryMs 覆盖 */
     this.forceDeliveryMs = config.forceDeliveryMs ?? DEFAULTS.FORCE_DELIVERY_MS;
+    this.onFinalSentences = config.onFinalSentences;
   }
 
   /** 注册翻译结果回调，返回取消注册函数 */
@@ -106,7 +144,8 @@ export class FastChannelPipeline {
     if (this.active) return;
     this.active = true;
     /** 初始化强制交付计时——允许首句也触发 5s 强制交付，避免 ASR 长时间不发 final 时首句翻译延迟 */
-    this.lastFinalTimestamp = Date.now();
+    this.lastFinalTimestamp = 0;
+    this.firstInterimTimestamp = 0;
   }
 
   /** 停止管线并清理全部状态 */
@@ -117,6 +156,13 @@ export class FastChannelPipeline {
     this.translatedSentences = [];
     this.lastFinalTimestamp = 0;
     this.latestInterimText = '';
+    this.firstInterimTimestamp = 0;
+    this.lastPreviewTimestamp = 0;
+    this.lastPreviewText = '';
+    this.activePreviewSegmentId = null;
+    this.translationQueue = [];
+    this.translating = false;
+    this.supersededPreviewSegments.clear();
     /** 释放外部资源：ASR WebSocket 连接和 LLM 进行中的 HTTP 流 */
     this.asr.dispose();
     this.llm.dispose();
@@ -173,40 +219,20 @@ export class FastChannelPipeline {
       const asrResult = await this.asr.recognize(item.data);
 
       /** 拉取 ASR 供应商的 interim 队列（如有），分发给 UI 实时展示 */
-      this.drainAndDispatchInterim();
+      this.drainAndDispatchInterim(item.timestamp);
 
       if (!asrResult.text) return;
 
       if (!asrResult.isFinal) {
-        /** interim 结果：保存最新文本，推送 UI 展示原文，不进入分句器 */
-        this.latestInterimText = asrResult.text;
-        this.interimCallbacks.forEach((cb) => cb(asrResult.text));
-        /** 长时间无 final 则强制交付——取最新 interim 作为伪 final 送入分段器 */
-        if (
-          this.lastFinalTimestamp > 0 &&
-          Date.now() - this.lastFinalTimestamp > this.forceDeliveryMs
-        ) {
-          await this.forceDeliverInterim(item.timestamp);
-        }
+        this.handleInterimText(asrResult.text, item.timestamp);
         return;
       }
 
       /** 记录 final 到达时间，重置强制交付状态 */
-      this.lastFinalTimestamp = Date.now();
-      this.latestInterimText = '';
+      this.handleFinalText(asrResult.text, item.timestamp);
+      return;
 
-      /** 第二步：语义分句——仅 final 结果参与 */
-      const sentences = this.segmenter.push(
-        asrResult.text,
-        item.timestamp,
-        true,
-      );
 
-      /** 第三步：逐句翻译 */
-      for (const sentence of sentences) {
-        if (!this.active) break;
-        await this.translateSentence(sentence);
-      }
     } catch (error) {
       this.handleError(error);
     } finally {
@@ -220,15 +246,95 @@ export class FastChannelPipeline {
    * 从 ASR 供应商拉取 pending interim 结果并分发给 UI
    * 通过 ASRProvider 接口方法调用，供应商无关
    */
-  private drainAndDispatchInterim(): void {
+  private drainAndDispatchInterim(timestamp: number): void {
     const interimList = this.asr.drainInterimResults();
     if (!interimList || interimList.length === 0) return;
 
     for (const r of interimList) {
       if (r.text) {
-        this.interimCallbacks.forEach((cb) => cb(r.text));
+        this.handleInterimText(r.text, timestamp);
       }
     }
+  }
+
+  private handleInterimText(text: string, timestamp: number): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    const now = Date.now();
+    if (this.firstInterimTimestamp === 0) {
+      this.firstInterimTimestamp = now;
+      firstScreenLatency.mark('first_asr_interim', `chars=${trimmed.length}`);
+    }
+
+    const changed = trimmed !== this.latestInterimText;
+    this.latestInterimText = trimmed;
+    if (changed) {
+      this.interimCallbacks.forEach((cb) => cb(trimmed));
+    }
+
+    this.maybeEnqueuePreview(now);
+
+    const deliveryBase = this.lastFinalTimestamp || this.firstInterimTimestamp;
+    if (deliveryBase > 0 && now - deliveryBase >= this.forceDeliveryMs) {
+      this.forceDeliverInterim(timestamp);
+    }
+  }
+
+  private handleFinalText(text: string, timestamp: number): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    const now = Date.now();
+    firstScreenLatency.mark('first_asr_final', `chars=${trimmed.length}`);
+    this.lastFinalTimestamp = now;
+
+    const segmentId = this.activePreviewSegmentId ?? this.createSegmentId();
+    this.firstInterimTimestamp = 0;
+    this.latestInterimText = '';
+
+    const sentences = this.segmenter.push(trimmed, timestamp, true);
+    if (sentences.length === 0) return;
+
+    this.activePreviewSegmentId = null;
+    this.lastPreviewTimestamp = 0;
+    this.lastPreviewText = '';
+    this.supersededPreviewSegments.add(segmentId);
+    this.notifyFinalSentences(sentences);
+    this.enqueueSentences(sentences, 'final', segmentId);
+  }
+
+  private maybeEnqueuePreview(now: number): void {
+    const elapsedSinceFirstInterim = this.firstInterimTimestamp === 0
+      ? 0
+      : now - this.firstInterimTimestamp;
+    const text = this.latestInterimText.trim();
+    const previewText = this.buildPreviewSlice(
+      text,
+      elapsedSinceFirstInterim >= DEFAULTS.PREVIEW_FORCE_MS,
+    );
+    if (!previewText || !this.isTranslatable(previewText)) return;
+
+    const segmentId = this.activePreviewSegmentId ?? this.createSegmentId();
+    this.activePreviewSegmentId = segmentId;
+
+    const elapsedSincePreview = this.lastPreviewTimestamp === 0
+      ? Number.POSITIVE_INFINITY
+      : now - this.lastPreviewTimestamp;
+    const charDelta = Math.max(0, previewText.length - this.lastPreviewText.length);
+
+    if (
+      previewText === this.lastPreviewText ||
+      charDelta < DEFAULTS.PREVIEW_MIN_CHAR_DELTA &&
+      elapsedSincePreview < DEFAULTS.PREVIEW_MIN_INTERVAL_MS &&
+      elapsedSinceFirstInterim < DEFAULTS.PREVIEW_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    this.lastPreviewTimestamp = now;
+    this.lastPreviewText = previewText;
+    this.enqueueTranslation({ text: previewText, segmentId, phase: 'preview' });
   }
 
   /**
@@ -237,46 +343,209 @@ export class FastChannelPipeline {
    * 取最新 interim 文本送入分段器，避免中文字幕长时间空白。
    * 触发条件：上次 final 距今超过 FORCE_DELIVERY_MS（3s）。
    */
-  private async forceDeliverInterim(timestamp: number): Promise<void> {
+  private buildPreviewSlice(text: string, forceByTime: boolean): string | null {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (normalized.length < DEFAULTS.PREVIEW_MIN_LENGTH) return null;
+
+    const words = this.extractEnglishWords(normalized);
+    const minWords = forceByTime ? 4 : DEFAULTS.PREVIEW_MIN_WORDS;
+    if (words.length < minWords) return null;
+
+    const punctuationSlice = this.sliceAtPreviewPunctuation(normalized, words, minWords);
+    if (punctuationSlice) return punctuationSlice;
+
+    const boundarySlice = this.sliceAtPreviewBoundaryWord(normalized, words, minWords);
+    if (boundarySlice) return boundarySlice;
+
+    if (words.length >= DEFAULTS.PREVIEW_TARGET_WORDS) {
+      return normalized.slice(0, words[DEFAULTS.PREVIEW_TARGET_WORDS - 1].end).trim();
+    }
+
+    if (forceByTime) {
+      return normalized.slice(0, words[words.length - 1].end).trim();
+    }
+
+    return null;
+  }
+
+  private extractEnglishWords(text: string): Array<{ value: string; start: number; end: number }> {
+    const words: Array<{ value: string; start: number; end: number }> = [];
+    const re = /[A-Za-z]+(?:['’][A-Za-z]+)?/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      words.push({
+        value: match[0],
+        start: match.index,
+        end: match.index + match[0].length,
+      });
+    }
+    return words;
+  }
+
+  private sliceAtPreviewPunctuation(
+    text: string,
+    words: Array<{ end: number }>,
+    minWords: number,
+  ): string | null {
+    const punctuation = /[,;:，；：—-]/g;
+    let match: RegExpExecArray | null;
+    while ((match = punctuation.exec(text)) !== null) {
+      const wordCount = words.filter((word) => word.end <= match!.index).length;
+      if (wordCount >= minWords) {
+        return text.slice(0, match.index + match[0].length).trim();
+      }
+    }
+    return null;
+  }
+
+  private sliceAtPreviewBoundaryWord(
+    text: string,
+    words: Array<{ value: string; end: number }>,
+    minWords: number,
+  ): string | null {
+    const maxBoundaryWord = Math.min(words.length, DEFAULTS.PREVIEW_TARGET_WORDS + 4);
+    for (let i = 1; i < maxBoundaryWord; i++) {
+      const word = words[i].value.toLowerCase();
+      if (!PREVIEW_BOUNDARY_WORDS.has(word)) continue;
+
+      const end = i >= minWords ? words[i - 1].end : words[i].end;
+      const slice = text.slice(0, end).trim();
+      if (this.extractEnglishWords(slice).length >= minWords) return slice;
+    }
+    return null;
+  }
+
+  private forceDeliverInterim(timestamp: number): void {
     const text = this.latestInterimText;
     this.latestInterimText = '';
     this.lastFinalTimestamp = Date.now();
+    this.firstInterimTimestamp = 0;
     if (!text) return;
 
+    firstScreenLatency.mark('force_delivery_triggered', `chars=${text.length}`);
+    const segmentId = this.activePreviewSegmentId ?? this.createSegmentId();
+    this.activePreviewSegmentId = segmentId;
     const sentences = this.segmenter.push(text, timestamp, true);
-    for (const sentence of sentences) {
-      if (!this.active) break;
-      await this.translateSentence(sentence);
+    if (sentences.length === 0) {
+      const remaining = this.segmenter.flush();
+      if (remaining) sentences.push(remaining);
     }
+    this.enqueueSentences(sentences, 'preview', segmentId);
   }
 
   /** 刷新缓冲，翻译剩余未交付的文本 */
+  private enqueueSentences(
+    sentences: string[],
+    phase: TranslationPhase,
+    firstSegmentId?: string,
+  ): void {
+    if (sentences.length === 0) return;
+    firstScreenLatency.mark('segment_output', `phase=${phase} count=${sentences.length}`);
+
+    sentences.forEach((sentence, index) => {
+      const segmentId = index === 0 && firstSegmentId ? firstSegmentId : this.createSegmentId();
+      this.enqueueTranslation({ text: sentence, segmentId, phase });
+    });
+  }
+
+  private notifyFinalSentences(sentences: string[]): void {
+    if (!this.onFinalSentences || sentences.length === 0) return;
+    try {
+      this.onFinalSentences([...sentences]);
+    } catch (error) {
+      console.warn('[channel2] feedSentences failed', error);
+    }
+  }
+
+  private enqueueTranslation(job: TranslationJob): void {
+    if (!this.active || !this.isTranslatable(job.text)) return;
+
+    if (job.phase === 'final') {
+      this.supersededPreviewSegments.add(job.segmentId);
+      this.translationQueue = this.translationQueue.filter(
+        (queued) => queued.phase !== 'preview' || queued.segmentId !== job.segmentId,
+      );
+    } else {
+      this.translationQueue = this.translationQueue.filter(
+        (queued) => queued.phase !== 'preview' || queued.segmentId !== job.segmentId,
+      );
+    }
+
+    this.translationQueue.push(job);
+    this.runTranslationQueue().catch((e) => this.handleError(e));
+  }
+
+  private async runTranslationQueue(): Promise<void> {
+    if (this.translating) return;
+
+    this.translating = true;
+    try {
+      while (this.active && this.translationQueue.length > 0) {
+        const job = this.translationQueue.shift()!;
+        if (job.phase === 'preview' && this.supersededPreviewSegments.has(job.segmentId)) {
+          continue;
+        }
+        await this.translateSentence(job);
+      }
+    } finally {
+      this.translating = false;
+    }
+  }
+
+  private async waitForTranslationIdle(): Promise<void> {
+    while (this.active && (this.translating || this.translationQueue.length > 0)) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  private createSegmentId(): string {
+    this.nextSegmentIndex += 1;
+    return `seg-${this.nextSegmentIndex}`;
+  }
+
   async flush(): Promise<void> {
     const remaining = this.segmenter.flush();
     if (remaining && this.active) {
-      await this.translateSentence(remaining);
+      this.enqueueTranslation({
+        text: remaining,
+        segmentId: this.createSegmentId(),
+        phase: 'final',
+      });
     }
+    await this.waitForTranslationIdle();
   }
 
   // ---- 内部 ----
 
   /** 翻译单个句子，流式产出结果并通知回调 */
-  private async translateSentence(text: string): Promise<void> {
+  private async translateSentence(job: TranslationJob): Promise<void> {
+    const { text, segmentId, phase } = job;
     /** 输入校验——过滤空输入和噪音文本，避免 LLM 返回占位/拒绝响应 */
     if (!this.isTranslatable(text)) return;
 
-    const request = this.buildTranslationRequest(text);
+    const request = this.buildTranslationRequest(text, phase);
     let finalResult: TranslationResult | null = null;
+    if (phase === 'preview') {
+      firstScreenLatency.mark('preview_translate_start', `chars=${text.length}`);
+    }
+    firstScreenLatency.mark('llm_request_start', `phase=${phase} chars=${text.length}`);
 
     let isFirstToken = true;
     try {
       for await (const result of this.llm.translate(request)) {
+        if (phase === 'preview' && this.supersededPreviewSegments.has(segmentId)) break;
         /** stop() 后立即停止流式消费——配合 AbortController abort 作为二次防御 */
         if (!this.active) break;
         /** 首个流式 token 携带原文文本，供字幕层展示英文（修复 B3：译文条目丢失 original 字段） */
-        const enriched: TranslationResult = isFirstToken
-          ? { ...result, originalText: text }
-          : result;
+        const enriched: TranslationResult = {
+          ...result,
+          originalText: text,
+          segmentId,
+          phase,
+        };
+        if (isFirstToken && (result.tokens.length > 0 || result.translation.length > 0)) {
+          firstScreenLatency.mark('first_llm_token', `phase=${phase}`);
+        }
         isFirstToken = false;
         /** 流式中间结果实时通知（打字机效果） */
         this.translationCallbacks.forEach((cb) => cb(enriched));
@@ -294,22 +563,24 @@ export class FastChannelPipeline {
       ? finalResult.tokens[finalResult.tokens.length - 1].index
       : this.translatedSentences.length;
 
-    this.translatedSentences.push({
+    if (phase === 'final') {
+      this.translatedSentences.push({
       index: tokenIndex,
       original: text,
       translation: finalResult.translation,
     });
 
     /** 限制历史长度，防止上下文窗口膨胀 */
-    if (this.translatedSentences.length > this.historySize) {
-      this.translatedSentences = this.translatedSentences.slice(-this.historySize);
+      if (this.translatedSentences.length > this.historySize) {
+        this.translatedSentences = this.translatedSentences.slice(-this.historySize);
+      }
     }
 
     /** 修正独立通知，与翻译结果区分，字幕层可据此触发修正动画 */
     if (finalResult.corrections.length > 0) {
       const { translation, corrections } = finalResult;
       this.translationCallbacks.forEach((cb) =>
-        cb({ translation, corrections, tokens: [] }),
+        cb({ translation, corrections, tokens: [], originalText: text, segmentId, phase }),
       );
     }
   }
@@ -327,12 +598,33 @@ export class FastChannelPipeline {
   }
 
   /** 构建翻译请求，注入共享上下文和翻译历史 */
-  private buildTranslationRequest(text: string): TranslationRequest {
+  private buildTranslationRequest(text: string, phase: TranslationPhase): TranslationRequest {
+    const context = this.getSharedContext();
+    if (phase !== 'preview' && this.hasSharedContext(context)) {
+      console.info('[channel1] shared context read', {
+        ts: Date.now(),
+        domain: context.domain,
+        terms: context.activeTerms.size,
+        hasSummary: context.recentSummary.trim().length > 0,
+        topics: context.topicHistory.length,
+      });
+    }
+
     return {
       text,
-      context: this.getSharedContext(),
-      previousSentences: [...this.translatedSentences],
+      context,
+      mode: phase,
+      previousSentences: phase === 'preview' ? [] : [...this.translatedSentences],
     };
+  }
+
+  private hasSharedContext(context: SharedContext): boolean {
+    return Boolean(
+      context.domain ||
+      context.activeTerms.size > 0 ||
+      context.recentSummary.trim().length > 0 ||
+      context.topicHistory.length > 0,
+    );
   }
 
   /** 统一错误分发 */
