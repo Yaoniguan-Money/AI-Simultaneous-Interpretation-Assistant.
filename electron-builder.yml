@@ -1,0 +1,27 @@
+# electron-builder.yml —— 打包配置
+# 输出 zip 分发包，用户解压即用，免安装
+appId: com.ai-interpreter.app
+productName: AI 同声传译助手
+directories:
+  output: release
+win:
+  target:
+    - target: zip
+      arch:
+        - x64
+  icon: assets/icon.ico
+  # 仅保留中英文——从 55 个 Chromium locale 文件(40.3MB) 裁剪到 2 个(0.9MB)
+  electronLanguages:
+    - en-US
+    - zh-CN
+# 输出文件名：ASCII 安全，避免中文在 CI/CD 中乱码
+artifactName: AI-Interpreter-${version}-${arch}.${ext}
+files:
+  - dist
+  - dist-electron
+
+# ASAR 打包——应用代码归档为 app.asar，防止篡改
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/**/*.node"

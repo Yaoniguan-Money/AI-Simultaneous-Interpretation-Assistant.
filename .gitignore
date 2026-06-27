@@ -1,0 +1,32 @@
+node_modules/
+dist/
+dist-electron/
+
+# 构建输出 —— 安装包与拆包目录
+release/
+.env
+.env.local
+*.log
+credentials.enc
+.DS_Store
+Thumbs.db
+
+# 比赛相关文档仅本地保留，不提交到仓库
+方案设计文档.md
+AI 同声传译助手.txt
+credentials.md
+
+# 设计参考文件（不提交到仓库）
+design-*.html
+
+# Claude Code 本地配置
+.claude/
+.agents/
+skills-lock.json
+
+# VSCode 本地配置
+.vscode/
+
+# Electron 内部文件（不应出现在项目根目录）
+default_app.js
+main.js

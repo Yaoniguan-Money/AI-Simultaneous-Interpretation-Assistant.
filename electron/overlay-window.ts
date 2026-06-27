@@ -1,0 +1,98 @@
+import { BrowserWindow, screen } from 'electron';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+/** ESM 环境下 __dirname 不可用，手动构造 */
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/** 默认窗口尺寸——初始高度 140px 覆盖 md 单语模式，后续由渲染进程按实际需求调整 */
+const DEFAULTS = {
+  width: 800,
+  height: 140,
+} as const;
+
+/** 字幕悬浮窗引用 */
+let overlayWindow: BrowserWindow | null = null;
+
+/** 创建透明置顶字幕悬浮窗 */
+export function createOverlayWindow(): BrowserWindow {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.show();
+    return overlayWindow;
+  }
+
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
+  const x = Math.round((screenWidth - DEFAULTS.width) / 2);
+  /** 屏幕底部居中，方案 6.1 要求 */
+  const y = screenHeight - DEFAULTS.height - 40;
+
+  overlayWindow = new BrowserWindow({
+    width: DEFAULTS.width,
+    height: DEFAULTS.height,
+    x,
+    y,
+    transparent: true,
+    frame: false,
+    alwaysOnTop: true,
+    resizable: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  /** 鼠标穿透——默认点击事件透传到下层窗口 */
+  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+
+  /** 加载悬浮窗页面（hash 路由）。开发模式用 dev server URL，生产模式用 loadFile 确保 ASAR 文件协议兼容 */
+  if (process.env.VITE_DEV_SERVER_URL) {
+    overlayWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL}#overlay`);
+  } else {
+    overlayWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: 'overlay' });
+  }
+
+  /** 窗口关闭时置空引用 */
+  overlayWindow.on('closed', () => {
+    overlayWindow = null;
+  });
+
+  return overlayWindow;
+}
+
+/** 隐藏字幕悬浮窗 */
+export function hideOverlayWindow(): void {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.hide();
+  }
+}
+
+/** 销毁字幕悬浮窗 */
+export function closeOverlayWindow(): void {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.close();
+    overlayWindow = null;
+  }
+}
+
+/** 调整悬浮窗尺寸并保持底部居中 */
+export function resizeOverlayWindow(width: number, height: number): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
+  const x = Math.round((screenWidth - width) / 2);
+  const y = screenHeight - height - 40;
+  overlayWindow.setSize(width, height);
+  overlayWindow.setPosition(x, y);
+}
+
+/** 获取字幕悬浮窗引用（供主进程 IPC 转发字幕数据使用） */
+export function getOverlayWindow(): BrowserWindow | null {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    return overlayWindow;
+  }
+  return null;
+}
